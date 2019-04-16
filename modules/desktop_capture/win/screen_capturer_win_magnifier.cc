@@ -141,6 +141,23 @@ void ScreenCapturerWinMagnifier::SetExcludedWindow(WindowId excluded_window) {
   }
 }
 
+bool ScreenCapturerWinMagnifier::SetExcludedWindows(
+    const std::vector<WindowId>& windows) {
+  if (magnifier_initialized_) {
+    BOOL result = set_window_filter_list_func_(
+        magnifier_window_, MW_FILTERMODE_EXCLUDE,
+        windows.size() ? windows.size() : 1,
+        windows.size() ? (HWND*)windows.data() : &magnifier_window_);
+    if (!result) {
+      RTC_LOG(LS_WARNING) << "error from MagSetWindowFilterList "
+                          << GetLastError()
+                          << " windws size:" << windows.size();
+    }
+    return result;
+  }
+  return false;
+}
+
 bool ScreenCapturerWinMagnifier::CaptureImage(const DesktopRect& rect) {
   RTC_DCHECK(magnifier_initialized_);
 
@@ -188,9 +205,15 @@ BOOL ScreenCapturerWinMagnifier::OnMagImageScalingCallback(
   ScreenCapturerWinMagnifier* owner =
       reinterpret_cast<ScreenCapturerWinMagnifier*>(TlsGetValue(GetTlsIndex()));
   TlsSetValue(GetTlsIndex(), nullptr);
-  owner->OnCaptured(srcdata, srcheader);
 
-  return TRUE;
+  // OnMagImageScalingCallback might be called 2 times with different clipped RECT
+  // though the data is the same, ignore the later
+  if (owner) {
+    owner->OnCaptured(srcdata, srcheader,
+                      DesktopVector(unclipped.right - clipped.right, 0));
+  }
+  // returning false, fix crash on dual monitor vertical configuration
+  return FALSE;
 }
 
 // TODO(zijiehe): These functions are available on Windows Vista or upper, so we
@@ -199,13 +222,13 @@ BOOL ScreenCapturerWinMagnifier::OnMagImageScalingCallback(
 bool ScreenCapturerWinMagnifier::InitializeMagnifier() {
   RTC_DCHECK(!magnifier_initialized_);
 
-  if (GetSystemMetrics(SM_CMONITORS) != 1) {
+  /*if (GetSystemMetrics(SM_CMONITORS) != 1) {
     // Do not try to use the magnifier in multi-screen setup (where the API
     // crashes sometimes).
     RTC_LOG_F(LS_WARNING) << "Magnifier capturer cannot work on multi-screen "
                              "system.";
     return false;
-  }
+  }*/
 
   desktop_dc_ = GetDC(nullptr);
 
@@ -321,7 +344,8 @@ bool ScreenCapturerWinMagnifier::InitializeMagnifier() {
 }
 
 void ScreenCapturerWinMagnifier::OnCaptured(void* data,
-                                            const MAGIMAGEHEADER& header) {
+                                            const MAGIMAGEHEADER& header,
+                                            const DesktopVector& offset) {
   DesktopFrame* current_frame = queue_.current_frame();
 
   // Verify the format.
@@ -347,7 +371,7 @@ void ScreenCapturerWinMagnifier::OnCaptured(void* data,
   current_frame->CopyPixelsFrom(
       reinterpret_cast<uint8_t*>(data), header.stride,
       DesktopRect::MakeXYWH(0, 0, header.width, header.height));
-
+  current_frame->set_top_left(offset);
   magnifier_capture_succeeded_ = true;
 }
 

@@ -69,8 +69,9 @@ class RTC_EXPORT CroppingWindowCapturer : public DesktopCapturer,
   WindowId selected_window() const { return selected_window_; }
   WindowId excluded_window() const { return excluded_window_; }
 
+  const DesktopCaptureOptions options_;
+
  private:
-  DesktopCaptureOptions options_;
   DesktopCapturer::Callback* callback_;
   std::unique_ptr<DesktopCapturer> window_capturer_;
   std::unique_ptr<DesktopCapturer> screen_capturer_;

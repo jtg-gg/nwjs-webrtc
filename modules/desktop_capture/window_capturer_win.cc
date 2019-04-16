@@ -13,6 +13,7 @@
 #include <memory>
 
 #include "modules/desktop_capture/cropped_desktop_frame.h"
+#include "modules/desktop_capture/desktop_capture_options.h"
 #include "modules/desktop_capture/desktop_capturer.h"
 #include "modules/desktop_capture/desktop_frame_win.h"
 #include "modules/desktop_capture/win/screen_capture_utils.h"
@@ -29,9 +30,14 @@ namespace webrtc {
 
 namespace {
 
+struct SourceListContext {
+  DesktopCapturer::SourceList list;
+  const bool allow_uwp_window_capture;
+};
+
 BOOL CALLBACK WindowsEnumerationHandler(HWND hwnd, LPARAM param) {
-  DesktopCapturer::SourceList* list =
-      reinterpret_cast<DesktopCapturer::SourceList*>(param);
+  SourceListContext* context = reinterpret_cast<SourceListContext*>(param);
+  DesktopCapturer::SourceList* list = &context->list;
 
   // Skip windows that are invisible, minimized, have no title, or are owned,
   // unless they have the app window style set.
@@ -68,10 +74,14 @@ BOOL CALLBACK WindowsEnumerationHandler(HWND hwnd, LPARAM param) {
   // either ApplicationFrameWindow or windows.UI.Core.coreWindow. The
   // associated windows cannot be captured, so we skip them.
   // http://crbug.com/526883.
-  if (rtc::IsWindows8OrLater() &&
-      (wcscmp(class_name, L"ApplicationFrameWindow") == 0 ||
-       wcscmp(class_name, L"Windows.UI.Core.CoreWindow") == 0)) {
-    return TRUE;
+  if (rtc::IsWindows8OrLater()) {
+    if (wcscmp(class_name, L"ApplicationFrameWindow") == 0 && 
+        !(context->allow_uwp_window_capture &&
+          ChildWindowsContains(hwnd, L"Windows.UI.Core.CoreWindow"))) {
+        return TRUE;
+    } else if (wcscmp(class_name, L"Windows.UI.Core.CoreWindow") == 0) {
+      return TRUE;
+    }
   }
 
   DesktopCapturer::Source window;
@@ -94,7 +104,7 @@ BOOL CALLBACK WindowsEnumerationHandler(HWND hwnd, LPARAM param) {
 
 class WindowCapturerWin : public DesktopCapturer {
  public:
-  WindowCapturerWin();
+  WindowCapturerWin(const bool allow_uwp_window_capture);
   ~WindowCapturerWin() override;
 
   // DesktopCapturer interface.
@@ -122,19 +132,25 @@ class WindowCapturerWin : public DesktopCapturer {
 
   WindowFinderWin window_finder_;
 
+  const bool allow_uwp_window_capture_;
+
   RTC_DISALLOW_COPY_AND_ASSIGN(WindowCapturerWin);
 };
 
-WindowCapturerWin::WindowCapturerWin() {}
+WindowCapturerWin::WindowCapturerWin(
+    const bool allow_uwp_window_capture)
+    : allow_uwp_window_capture_(allow_uwp_window_capture) {}
 WindowCapturerWin::~WindowCapturerWin() {}
 
 bool WindowCapturerWin::GetSourceList(SourceList* sources) {
-  SourceList result;
-  LPARAM param = reinterpret_cast<LPARAM>(&result);
+  SourceListContext context = {DesktopCapturer::SourceList(),
+                              allow_uwp_window_capture_};
+  LPARAM param = reinterpret_cast<LPARAM>(&context);
   // EnumWindows only enumerates root windows.
   if (!EnumWindows(&WindowsEnumerationHandler, param))
     return false;
 
+  DesktopCapturer::SourceList& result = context.list;
   for (auto it = result.begin(); it != result.end();) {
     if (!window_capture_helper_.IsWindowOnCurrentDesktop(
             reinterpret_cast<HWND>(it->id))) {
@@ -331,13 +347,18 @@ void WindowCapturerWin::CaptureFrame() {
   if (!result) {
     RTC_LOG(LS_ERROR) << "Both PrintWindow() and BitBlt() failed.";
     callback_->OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
+    return;
   }
 
   // Rect for the data is relative to the first pixel of the frame.
   cropped_rect.Translate(-original_rect.left(), -original_rect.top());
   std::unique_ptr<DesktopFrame> cropped_frame =
       CreateCroppedDesktopFrame(std::move(frame), cropped_rect);
-  RTC_DCHECK(cropped_frame);
+  if(!cropped_frame.get()) {
+    RTC_LOG(LS_ERROR) << "cropped_frame is null.";
+    callback_->OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
+    return;
+  }
 
   callback_->OnCaptureResult(Result::SUCCESS, std::move(cropped_frame));
 }
@@ -347,7 +368,8 @@ void WindowCapturerWin::CaptureFrame() {
 // static
 std::unique_ptr<DesktopCapturer> DesktopCapturer::CreateRawWindowCapturer(
     const DesktopCaptureOptions& options) {
-  return std::unique_ptr<DesktopCapturer>(new WindowCapturerWin());
+  return std::unique_ptr<DesktopCapturer>(new WindowCapturerWin(
+      options.allow_uwp_window_capture()));
 }
 
 }  // namespace webrtc
