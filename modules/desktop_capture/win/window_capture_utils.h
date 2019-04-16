@@ -66,6 +66,8 @@ bool GetDcSize(HDC hdc, DesktopSize* size);
 // function returns false if native APIs fail.
 bool IsWindowMaximized(HWND window, bool* result);
 
+bool ChildWindowsContains(HWND parent, LPCTSTR class_name);
+
 typedef HRESULT(WINAPI* DwmIsCompositionEnabledFunc)(BOOL* enabled);
 typedef HRESULT(WINAPI* DwmGetWindowAttributeFunc)(HWND hwnd,
                                                    DWORD flag,

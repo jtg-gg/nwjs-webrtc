@@ -13,7 +13,10 @@
 #include "modules/desktop_capture/win/screen_capture_utils.h"
 #include "modules/desktop_capture/win/selected_window_context.h"
 #include "modules/desktop_capture/win/window_capture_utils.h"
+#include "rtc_base/event.h"
 #include "rtc_base/logging.h"
+#include "rtc_base/thread.h"
+#include "rtc_base/time_utils.h"
 #include "rtc_base/trace_event.h"
 #include "rtc_base/win32.h"
 
@@ -22,21 +25,26 @@ namespace webrtc {
 namespace {
 
 // Used to pass input/output data during the EnumWindows call for verifying if
+const size_t kClassLength = 256;
+
 // the selected window is on top.
 struct TopWindowVerifierContext : public SelectedWindowContext {
   TopWindowVerifierContext(HWND selected_window,
                            HWND excluded_window,
                            DesktopRect selected_window_rect,
-                           WindowCaptureHelperWin* window_capture_helper)
+                           WindowCaptureHelperWin* window_capture_helper,
+                           const bool allow_uwp_window_capture)
       : SelectedWindowContext(selected_window,
                               selected_window_rect,
                               window_capture_helper),
         excluded_window(excluded_window),
+        allow_uwp_window_capture(allow_uwp_window_capture),
         is_top_window(false) {
     RTC_DCHECK_NE(selected_window, excluded_window);
   }
 
   const HWND excluded_window;
+  const bool allow_uwp_window_capture;
   bool is_top_window;
 };
 
@@ -84,6 +92,19 @@ BOOL CALLBACK TopWindowVerifier(HWND hwnd, LPARAM param) {
     return TRUE;
   }
 
+  if (context->allow_uwp_window_capture && context->IsUWPAncestor(hwnd)) {
+    return TRUE;
+  }
+
+  if (context->allow_uwp_window_capture) {
+    WCHAR class_name[kClassLength];
+    const int class_name_length = GetClassNameW(hwnd, class_name, kClassLength);
+    RTC_DCHECK(class_name_length) << "Error retrieving the window's class name";
+    if (wcscmp(class_name, L"Windows.UI.Core.CoreWindow") == 0) {
+      return TRUE;
+    }
+  }
+
   // Checks whether current window |hwnd| intersects with
   // |context|->selected_window.
   if (context->IsWindowOverlapping(hwnd)) {
@@ -96,23 +117,79 @@ BOOL CALLBACK TopWindowVerifier(HWND hwnd, LPARAM param) {
   return TRUE;
 }
 
+class WindowsTopOfMeWorker {
+ public:
+  WindowsTopOfMeWorker(WindowCaptureHelperWin* window_capture_helper);
+  void SelectWindow(HWND window);
+  bool IsChanged(uint32_t in_last_ms);
+
+  // used by ShouldUseScreenCapture
+  std::vector<HWND> core_windows() { 
+    if (thread_) {
+      event_.Set();
+      event_.Reset();
+      event_.Wait(rtc::Event::kForever);
+    }
+    return core_windows_; 
+  }
+
+  static const uint32_t kLastMsThreshold;
+
+ private:
+  void Run(rtc::Thread* thread);
+  int ignore_counter_;
+  std::unique_ptr<rtc::Thread> thread_;
+  rtc::Event event_;
+  WindowCaptureHelperWin* window_capture_helper_;
+  HWND selected_window_;
+  std::vector<HWND> core_windows_;
+  std::vector<HWND> windows_top_of_me_;
+  uint32_t last_changed_;
+  // kFps is how fast is this worker should run
+  static const int kFps;
+  // kIgnoreCounter is currently 2, the number of IsChanged function called
+  // during CaptureFrame until OnCaptureResult
+  static const int kIgnoreCounter;
+};
+
 class CroppingWindowCapturerWin : public CroppingWindowCapturer {
  public:
   CroppingWindowCapturerWin(const DesktopCaptureOptions& options)
-      : CroppingWindowCapturer(options) {}
+      : CroppingWindowCapturer(options),
+        capturer_(Unknown),
+        should_use_screen_capturer_cache_(Empty) {}
 
  private:
   bool ShouldUseScreenCapturer() override;
+  void CaptureFrame() override;
+  bool SelectSource(SourceId id) override;
   DesktopRect GetWindowRectInVirtualScreen() override;
+  void OnCaptureResult(DesktopCapturer::Result result,
+                       std::unique_ptr<DesktopFrame> frame) override;
 
   // The region from GetWindowRgn in the desktop coordinate if the region is
   // rectangular, or the rect from GetWindowRect if the region is not set.
   DesktopRect window_region_rect_;
-
+  DesktopVector offset_;
+  enum Capturer {
+    Unknown,
+    Screen,
+    Window,
+  };
+  Capturer capturer_;
   WindowCaptureHelperWin window_capture_helper_;
+  std::unique_ptr<WindowsTopOfMeWorker> windows_top_of_me_worker_;
+  enum BoolCache {
+    Empty = -1,
+    False,
+    True,
+  };
+  BoolCache should_use_screen_capturer_cache_;
 };
 
 bool CroppingWindowCapturerWin::ShouldUseScreenCapturer() {
+  // RTC_DLOG(INFO) << "ShouldUseScreenCapturer()";
+
   if (!rtc::IsWindows8OrLater() && window_capture_helper_.IsAeroEnabled()) {
     return false;
   }
@@ -144,7 +221,7 @@ bool CroppingWindowCapturerWin::ShouldUseScreenCapturer() {
     }
   }
 
-  if (!GetWindowRect(selected, &window_region_rect_)) {
+  if (window_region_rect_.equals(DesktopRect())) {
     return false;
   }
 
@@ -194,13 +271,293 @@ bool CroppingWindowCapturerWin::ShouldUseScreenCapturer() {
   // function.
   TopWindowVerifierContext context(selected,
                                    reinterpret_cast<HWND>(excluded_window()),
-                                   content_rect, &window_capture_helper_);
+                                   content_rect, &window_capture_helper_,
+                                   options_.allow_uwp_window_capture() &&
+                                   rtc::IsWindows8OrLater());
   if (!context.IsSelectedWindowValid()) {
     return false;
   }
 
+  if (windows_top_of_me_worker_) {
+    for (auto hwnd : windows_top_of_me_worker_->core_windows()) {
+      if (context.IsWindowOverlapping(hwnd)) {
+        return false;
+      }
+    }
+  }
+
   EnumWindows(&TopWindowVerifier, reinterpret_cast<LPARAM>(&context));
   return context.is_top_window;
+}
+
+struct WindowsTopOfMeContext : public SelectedWindowContext{
+  WindowsTopOfMeContext(HWND selected_window,
+                        DesktopRect selected_window_rect,
+                        WindowCaptureHelperWin* window_capture_helper)
+      : SelectedWindowContext(selected_window,
+                              selected_window_rect,
+                              window_capture_helper),
+        window_is_moving(false) {
+    selected_window_thread_id = 
+        GetWindowThreadProcessId(selected_window, &selected_window_process_id);
+  }
+
+  DWORD selected_window_thread_id;
+  DWORD selected_window_process_id;
+  bool window_is_moving;
+  std::vector<HWND> windows_top_of_me;
+};
+
+BOOL CALLBACK WindowsTopOfMe(HWND hwnd, LPARAM param) {
+  WindowsTopOfMeContext* context =
+      reinterpret_cast<WindowsTopOfMeContext*>(param);
+
+  if (!context->window_is_moving) {
+    GUITHREADINFO gui;
+    gui.cbSize = sizeof(GUITHREADINFO);
+    if (GetGUIThreadInfo(GetWindowThreadProcessId(hwnd, NULL), &gui)) {
+      if (gui.flags & GUI_INMOVESIZE) {
+        context->window_is_moving = true;
+      }
+    }
+  }
+
+  if (context->IsWindowSelected(hwnd)) {
+    return FALSE;
+  }
+
+  // Ignore invisible window on current desktop.
+  if (!context->window_capture_helper()->IsWindowVisibleOnCurrentDesktop(hwnd)) {
+    return TRUE;
+  }
+
+  // Ignore descendant/owned windows since we want to capture them.
+  if (context->IsWindowOwned(hwnd)) {
+    return TRUE;
+  }
+
+  if (context->IsUWPAncestor(hwnd)) {
+    return TRUE;
+  }
+
+  // If intersection empty, ignore
+  if (!context->IsWindowOverlapping(hwnd)) {
+    return TRUE;
+  }
+
+  context->windows_top_of_me.push_back(hwnd);
+  return TRUE;
+}
+
+const int WindowsTopOfMeWorker::kFps = 30;
+const int WindowsTopOfMeWorker::kIgnoreCounter = 2;
+const uint32_t WindowsTopOfMeWorker::kLastMsThreshold = 500;
+
+WindowsTopOfMeWorker::WindowsTopOfMeWorker(
+    WindowCaptureHelperWin* window_capture_helper)
+    : ignore_counter_(kIgnoreCounter),
+      window_capture_helper_(window_capture_helper),
+      last_changed_(0) {}
+
+void WindowsTopOfMeWorker::SelectWindow(HWND window) {
+  selected_window_ = window;
+  windows_top_of_me_.clear();
+  last_changed_ = 0;
+  ignore_counter_ = kIgnoreCounter;
+}
+
+void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
+  do {
+    std::vector<HWND> windows;
+    if (rtc::IsWindows8OrLater()) {
+      // these window classes if not cloacked, add it to windows vector
+      const WCHAR* string_class[] = {L"Windows.UI.Core.CoreWindow",
+                                     L"Shell_InputSwitchTopLevelWindow"};
+      for (auto s : string_class) {
+        HWND hWnd = FindWindowExW(NULL, NULL, s, NULL);
+        while (hWnd != NULL) {
+          if (!window_capture_helper_->IsWindowCloaked(hWnd)) {
+            windows.push_back(hWnd);
+          }
+          hWnd = FindWindowExW(NULL, hWnd, s, NULL);
+        }
+      }
+    }
+    DesktopRect selected_window_rect;
+    GetWindowContentRect(selected_window_, &selected_window_rect);
+    WindowsTopOfMeContext context(selected_window_, selected_window_rect, window_capture_helper_);
+    HWND hWnd = FindWindowExW(NULL, NULL, L"Shell_TrayWnd", NULL);
+    // if "start" menu is visible
+    if (hWnd != NULL &&
+        window_capture_helper_->IsWindowVisibleOnCurrentDesktop(hWnd)) {
+      windows.push_back(hWnd);
+      // these classes sometimes are not enumerated by "EnumWindows"
+      // these window classes can only exist in the "root" if start menu is visible
+      const WCHAR* string_class[] = {L"TaskListThumbnailWnd", L"#32768",
+                                     L"tooltips_class32",
+                                     L"Xaml_WindowedPopupClass", L"SysShadow"};
+      for (auto s : string_class) {
+        hWnd = FindWindowExW(NULL, NULL, s, NULL);
+        while (hWnd != NULL) {
+          if (!context.IsWindowOwned(hWnd) && !context.IsUWPAncestor(hWnd) &&
+              window_capture_helper_->IsWindowVisibleOnCurrentDesktop(hWnd)) {
+            windows.push_back(hWnd);
+          }
+          hWnd = FindWindowExW(NULL, hWnd, s, NULL);
+        }
+      }
+    }
+    core_windows_ = windows;
+
+    EnumWindows(&WindowsTopOfMe, reinterpret_cast<LPARAM>(&context));
+
+    // remove hwnd from windows vector if it is already in the
+    // context.windows_top_of_me
+    for (auto hWnd : context.windows_top_of_me) {
+      auto it = std::find(windows.begin(), windows.end(), hWnd);
+      if (it != windows.end()) {
+        windows.erase(it);
+      }
+    }
+
+    // add hwnd in windows vector to context.windows_top_of_me vector
+    // if hwnd is intersecting with selected window
+    for (auto hWnd : windows) {
+      DesktopRect content_rect;
+      if (GetWindowContentRect(hWnd, &content_rect)) {
+        content_rect.IntersectWith(selected_window_rect);
+        if (!content_rect.is_empty()) {
+          context.windows_top_of_me.push_back(hWnd);
+        }
+      }
+    }
+
+    // the main purpose of this function, calculate if windows_top_of_me has changed
+    if (context.window_is_moving ||
+        windows_top_of_me_ != context.windows_top_of_me) {
+      windows_top_of_me_ = context.windows_top_of_me;
+      last_changed_ = rtc::Time32();
+    }
+
+    if (thread && !thread->IsQuitting()) {
+      event_.Set();
+      event_.Reset();
+      event_.Wait(1000 / kFps);
+    }
+  } while (thread && !thread->IsQuitting());
+}
+
+bool WindowsTopOfMeWorker::IsChanged(uint32_t in_last_ms) {
+  if (ignore_counter_ > 0) {
+    ignore_counter_--;
+    return false;
+  }
+  if (!thread_) {
+    thread_ = rtc::Thread::Create();
+    if (thread_->Start(/*this*/)) {
+      RTC_LOG(LS_INFO) << "WindowsTopOfMeWorker Started succesfully";
+    } else {
+      RTC_LOG(LS_ERROR) << "WindowsTopOfMeWorker Start fail";
+    }
+    thread_->PostTask(RTC_FROM_HERE, [this]() {
+      HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+      this->Run(this->thread_.get());
+      if (SUCCEEDED(hr)) {
+        CoUninitialize();
+      }
+    });
+  }
+  return (rtc::Time32() - last_changed_) < in_last_ms;
+}
+
+bool CroppingWindowCapturerWin::SelectSource(SourceId id) {
+  capturer_ = Unknown;
+  HWND hwnd = reinterpret_cast<HWND>(id);
+  if (windows_top_of_me_worker_) {
+    windows_top_of_me_worker_->SelectWindow(hwnd);
+  }
+  return CroppingWindowCapturer::SelectSource(id);
+}
+
+void CroppingWindowCapturerWin::CaptureFrame() {
+  if (!GetWindowRect(reinterpret_cast<HWND>(selected_window()),
+                     &window_region_rect_)) {
+    window_region_rect_ = DesktopRect();
+  }
+
+  if (options_.allow_uwp_window_capture() &&
+      !windows_top_of_me_worker_) {
+    windows_top_of_me_worker_ =
+        std::make_unique<WindowsTopOfMeWorker>(&window_capture_helper_);
+    windows_top_of_me_worker_->SelectWindow(
+        reinterpret_cast<HWND>(selected_window()));
+  }
+
+  if (windows_top_of_me_worker_ &&
+      windows_top_of_me_worker_->IsChanged(
+          WindowsTopOfMeWorker::kLastMsThreshold)) {
+    RTC_DLOG(LS_INFO) << "Windows order was changed, during the past "
+                      << WindowsTopOfMeWorker::kLastMsThreshold << " ms";
+
+    // hack so CroppingWindowCapturer::OnCaptureResult doesn't fallback to
+    // window capturer
+    should_use_screen_capturer_cache_ = True;
+    CroppingWindowCapturer::OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
+    should_use_screen_capturer_cache_ = Empty;
+    return;
+  }
+
+  RTC_DCHECK(should_use_screen_capturer_cache_ == Empty)
+      << "should_use_screen_capturer_cache_ should be Empty";
+  should_use_screen_capturer_cache_ = ShouldUseScreenCapturer() ? True : False;
+
+
+  if (capturer_ != Unknown && capturer_ != Screen &&
+      should_use_screen_capturer_cache_ == True) {
+    static const DWORD kFullScreenTransitionTime = 34;
+    // transtion to screen capturer
+    RTC_DLOG(LS_INFO) << "transtion to screen capturer Sleep for "
+                      << kFullScreenTransitionTime << " ms";
+    Sleep(kFullScreenTransitionTime);
+    capturer_ = Screen;
+    CroppingWindowCapturer::OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
+    should_use_screen_capturer_cache_ = Empty;
+    return;
+  }
+
+  switch (should_use_screen_capturer_cache_) {
+    case True:
+      capturer_ = Screen;
+      break;
+    case False:
+      capturer_ = Window;
+      break;
+    default:
+      capturer_ = Unknown;
+  }
+  RTC_DLOG(LS_INFO) << "Captured using " << capturer_;
+  CroppingWindowCapturer::CaptureFrame();
+  should_use_screen_capturer_cache_ = Empty;
+}
+
+void CroppingWindowCapturerWin::OnCaptureResult(
+    DesktopCapturer::Result result,
+    std::unique_ptr<DesktopFrame> screen_frame) {
+  // hack so CroppingWindowCapturer::OnCaptureResult doesn't fallback to
+  // window capturer
+  should_use_screen_capturer_cache_ = True;
+  if (windows_top_of_me_worker_ &&
+      windows_top_of_me_worker_->IsChanged(
+          WindowsTopOfMeWorker::kLastMsThreshold)) {
+    RTC_DLOG(LS_INFO) << "Windows order has changed, during capture";
+    CroppingWindowCapturer::OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
+    // clear cache for next capture frame
+    should_use_screen_capturer_cache_ = Empty;
+    return;
+  }
+
+  CroppingWindowCapturer::OnCaptureResult(result, std::move(screen_frame));
+  should_use_screen_capturer_cache_ = Empty;
 }
 
 DesktopRect CroppingWindowCapturerWin::GetWindowRectInVirtualScreen() {

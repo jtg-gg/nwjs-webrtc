@@ -50,6 +50,7 @@ class ScreenCapturerWinMagnifier : public DesktopCapturer {
   bool GetSourceList(SourceList* screens) override;
   bool SelectSource(SourceId id) override;
   void SetExcludedWindow(WindowId window) override;
+  bool SetExcludedWindows(const std::vector<WindowId>& windows);
 
  private:
   typedef BOOL(WINAPI* MagImageScalingCallback)(HWND hwnd,
@@ -93,7 +94,7 @@ class ScreenCapturerWinMagnifier : public DesktopCapturer {
   bool InitializeMagnifier();
 
   // Called by OnMagImageScalingCallback to output captured data.
-  void OnCaptured(void* data, const MAGIMAGEHEADER& header);
+  void OnCaptured(void* data, const MAGIMAGEHEADER& header, const DesktopVector& offset);
 
   // Makes sure the current frame exists and matches |size|.
   void CreateCurrentFrameIfNecessary(const DesktopSize& size);

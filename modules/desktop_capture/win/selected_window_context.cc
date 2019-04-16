@@ -48,6 +48,20 @@ bool SelectedWindowContext::IsWindowOwned(HWND hwnd) const {
          enumerated_window_thread_id == selected_window_thread_id_;
 }
 
+bool SelectedWindowContext::IsUWPAncestor(HWND hwnd) const {
+  // Xaml_WindowedPopupClass has "PopupHost" title, and different process id
+  // hence we need to iterate using GetParent to confirm the ancestry
+  HWND it = hwnd;
+  while (it != NULL) {
+    it = GetParent(it);
+    if (it == selected_window_) {
+      // we don't won't to capture child window that has titlebar / WS_CAPTION 
+      return !(GetWindowLongPtr(hwnd, GWL_STYLE) & WS_CAPTION);
+    }
+  }
+  return FALSE;
+}
+
 bool SelectedWindowContext::IsWindowOverlapping(HWND hwnd) const {
   return window_capture_helper_->IsWindowIntersectWithSelectedWindow(
       hwnd, selected_window_, selected_window_rect_);
