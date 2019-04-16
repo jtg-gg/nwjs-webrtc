@@ -141,6 +141,22 @@ void ScreenCapturerWinMagnifier::SetExcludedWindow(WindowId excluded_window) {
   }
 }
 
+bool ScreenCapturerWinMagnifier::SetExcludedWindows(
+    const std::vector<WindowId>& windows) {
+  if (magnifier_initialized_) {
+    BOOL result = set_window_filter_list_func_(
+        magnifier_window_, MW_FILTERMODE_EXCLUDE, windows.size() ? windows.size() : 1,
+        windows.size() ? (HWND*)windows.data() : &magnifier_window_);
+    if (!result) {
+      RTC_LOG(LS_WARNING) << "error from MagSetWindowFilterList "
+                          << GetLastError()
+                          << " windws size:" << windows.size();
+    }
+    return result;
+  }
+  return false;
+}
+
 bool ScreenCapturerWinMagnifier::CaptureImage(const DesktopRect& rect) {
   RTC_DCHECK(magnifier_initialized_);
 
@@ -199,13 +215,13 @@ BOOL ScreenCapturerWinMagnifier::OnMagImageScalingCallback(
 bool ScreenCapturerWinMagnifier::InitializeMagnifier() {
   RTC_DCHECK(!magnifier_initialized_);
 
-  if (GetSystemMetrics(SM_CMONITORS) != 1) {
+  /*if (GetSystemMetrics(SM_CMONITORS) != 1) {
     // Do not try to use the magnifier in multi-screen setup (where the API
     // crashes sometimes).
     RTC_LOG_F(LS_WARNING) << "Magnifier capturer cannot work on multi-screen "
                              "system.";
     return false;
-  }
+  }*/
 
   desktop_dc_ = GetDC(nullptr);
 

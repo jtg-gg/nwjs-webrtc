@@ -50,6 +50,7 @@ class ScreenCapturerWinMagnifier : public DesktopCapturer {
   bool GetSourceList(SourceList* screens) override;
   bool SelectSource(SourceId id) override;
   void SetExcludedWindow(WindowId window) override;
+  bool SetExcludedWindows(const std::vector<WindowId>& windows);
 
  private:
   typedef BOOL(WINAPI* MagImageScalingCallback)(HWND hwnd,

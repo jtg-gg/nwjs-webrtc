@@ -10,7 +10,9 @@
 
 #include "modules/desktop_capture/cropping_window_capturer.h"
 
+#include <queue>
 #include "modules/desktop_capture/win/screen_capture_utils.h"
+#include "modules/desktop_capture/win/screen_capturer_win_magnifier.h"
 #include "modules/desktop_capture/win/window_capture_utils.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/trace_event.h"
@@ -115,6 +117,13 @@ BOOL CALLBACK TopWindowVerifier(HWND hwnd, LPARAM param) {
     }
   }
 
+  const size_t kClassLength = 256;
+  WCHAR class_name[kClassLength];
+  const int class_name_length = GetClassName(hwnd, class_name, kClassLength);
+  RTC_DCHECK(class_name_length) << "Error retrieving the window's class name";
+  if (wcscmp(class_name, L"Windows.UI.Core.CoreWindow") == 0) { 
+    return TRUE;
+  }
   // Checks whether current window |hwnd| intersects with
   // |context|->selected_window.
   // |content_rect| is preferred because,
@@ -155,19 +164,44 @@ class CroppingWindowCapturerWin : public CroppingWindowCapturer {
  public:
   CroppingWindowCapturerWin(const DesktopCaptureOptions& options)
       : CroppingWindowCapturer(options) {}
+  ~CroppingWindowCapturerWin();
 
  private:
   bool ShouldUseScreenCapturer() override;
+  bool ShouldUseMagnifier();
+  void CaptureFrame() override;
   DesktopRect GetWindowRectInVirtualScreen() override;
+  void OnCaptureResult(DesktopCapturer::Result result,
+                       std::unique_ptr<DesktopFrame> frame) override;
 
   // The region from GetWindowRgn in the desktop coordinate if the region is
   // rectangular, or the rect from GetWindowRect if the region is not set.
   DesktopRect window_region_rect_;
 
   WindowCaptureHelperWin window_capture_helper_;
+
+  static rtc::CriticalSection screen_magnifier_capturer_init_lock_;
+  std::queue<bool> should_use_screen_capturer_cache_;
+  std::unique_ptr<ScreenCapturerWinMagnifier> screen_magnifier_capturer_;
 };
 
+rtc::CriticalSection
+    CroppingWindowCapturerWin::screen_magnifier_capturer_init_lock_;
+
+CroppingWindowCapturerWin::~CroppingWindowCapturerWin() {
+  if (screen_magnifier_capturer_) {
+    screen_magnifier_capturer_.reset(nullptr);
+    screen_magnifier_capturer_init_lock_.Leave();
+  }
+}
+
 bool CroppingWindowCapturerWin::ShouldUseScreenCapturer() {
+  if (!should_use_screen_capturer_cache_.empty()) {
+    const bool val = should_use_screen_capturer_cache_.front();
+    should_use_screen_capturer_cache_.pop();
+    return val;
+  }
+
   if (!rtc::IsWindows8OrLater() && window_capture_helper_.IsAeroEnabled()) {
     return false;
   }
@@ -262,6 +296,161 @@ bool CroppingWindowCapturerWin::ShouldUseScreenCapturer() {
   // or textboxes.
   EnumChildWindows(selected, &TopWindowVerifier, enum_param);
   return context.is_top_window;
+}
+
+bool CroppingWindowCapturerWin::ShouldUseMagnifier() {
+  HWND hwnd = reinterpret_cast<HWND>(selected_window());
+  const size_t kClassLength = 256;
+  WCHAR class_name[kClassLength];
+  const int class_name_length = GetClassName(hwnd, class_name, kClassLength);
+  RTC_DCHECK(class_name_length)
+      << "Error retrieving the application's class name";
+
+  if (rtc::IsWindows8OrLater() &&
+      wcscmp(class_name, L"ApplicationFrameWindow") == 0)
+    return true;
+
+  if (ChildWindowsContains(hwnd, L"Intermediate D3D Window"))
+    return true;
+
+  return false;
+}
+
+struct WindowsTopOfMeContext {
+  WindowsTopOfMeContext(HWND selected_window,
+                        WindowCaptureHelperWin* window_capture_helper)
+      : selected_window(selected_window),
+        window_capture_helper(window_capture_helper) {
+    GetWindowText(selected_window, selected_window_title, kTitleLength);
+    GetWindowThreadProcessId(selected_window, &selected_window_process_id);
+    GetWindowContentRect(selected_window, &selected_window_rect);
+  }
+
+  std::vector<WindowId>& window_ids_top_of_me() {
+    return reinterpret_cast<std::vector<WindowId>&>(windows_top_of_me);
+  }
+
+  const HWND selected_window;
+  WindowCaptureHelperWin* window_capture_helper;
+  DesktopRect selected_window_rect;
+  WCHAR selected_window_title[kTitleLength];
+  DWORD selected_window_process_id;
+  std::vector<HWND> windows_top_of_me;
+};
+
+BOOL CALLBACK WindowsTopOfMe(HWND hwnd, LPARAM param) {
+  WindowsTopOfMeContext* context =
+      reinterpret_cast<WindowsTopOfMeContext*>(param);
+
+  if (hwnd == context->selected_window)
+    return FALSE;
+
+  // Ignore invisible window on current desktop.
+  if (!context->window_capture_helper->IsWindowVisibleOnCurrentDesktop(hwnd)) {
+    return TRUE;
+  }
+
+  if (context->window_capture_helper->IsWindowChromeNotification(hwnd)) {
+    return TRUE;
+  }
+
+  // Ignore descendant windows since we want to capture them.
+  // This check does not work for tooltips and context menus. Drop down menus
+  // and popup windows are fine.
+  //
+  // GA_ROOT returns the root window instead of the owner. I.e. for a dialog
+  // window, GA_ROOT returns the dialog window itself. GA_ROOTOWNER returns the
+  // application main window which opens the dialog window. Since we are sharing
+  // the application main window, GA_ROOT should be used here.
+  if (GetAncestor(hwnd, GA_ROOT) == context->selected_window) {
+    return TRUE;
+  }
+
+  WCHAR window_title[kTitleLength];
+  GetWindowText(hwnd, window_title, kTitleLength);
+  if (wcsnlen_s(window_title, kTitleLength) == 0 ||
+      wcscmp(window_title, context->selected_window_title) == 0) {
+    DWORD enumerated_window_process_id;
+    GetWindowThreadProcessId(hwnd, &enumerated_window_process_id);
+    if (context->selected_window_process_id == enumerated_window_process_id) {
+      return TRUE;
+    }
+  }
+
+  DesktopRect content_rect;
+  if (!GetWindowContentRect(hwnd, &content_rect)) {
+    // Bail out if failed to get the window area.
+    return TRUE;
+  }
+
+  content_rect.IntersectWith(context->selected_window_rect);
+
+  // If intersection empty, ignore
+  if (content_rect.is_empty()) {
+    return TRUE;
+  }
+
+  context->windows_top_of_me.push_back(hwnd);
+  return TRUE;
+}
+
+void CroppingWindowCapturerWin::CaptureFrame() {
+  RTC_DCHECK(should_use_screen_capturer_cache_.empty());
+  if (ShouldUseMagnifier()) {
+    const bool should_use_screen_capture = ShouldUseScreenCapturer();
+    should_use_screen_capturer_cache_.push(true);
+    if (!should_use_screen_capture) {
+      should_use_screen_capturer_cache_.push(true);
+      
+      if (!screen_magnifier_capturer_.get() &&
+          screen_magnifier_capturer_init_lock_.TryEnter()) {
+        screen_magnifier_capturer_ =
+            std::make_unique<ScreenCapturerWinMagnifier>();
+        screen_magnifier_capturer_->Start(this);
+      }
+
+      if (screen_magnifier_capturer_) {
+        WindowsTopOfMeContext context(reinterpret_cast<HWND>(selected_window()),
+                                      &window_capture_helper_);
+
+        EnumWindows(&WindowsTopOfMe, reinterpret_cast<LPARAM>(&context));
+        if (screen_magnifier_capturer_->SetExcludedWindows(
+                context.window_ids_top_of_me())) {
+          RTC_LOG(LS_INFO)
+              << "Capture using screen_magnifier_capturer_";
+          screen_magnifier_capturer_->CaptureFrame();
+          return;
+        } else {
+          bool res = screen_magnifier_capturer_->SetExcludedWindows(
+              std::vector<WindowId>());
+          RTC_DCHECK(res);
+        }
+      } else {
+        should_use_screen_capturer_cache_.pop();
+      }
+    }
+  }
+  CroppingWindowCapturer::CaptureFrame();
+}
+
+void CroppingWindowCapturerWin::OnCaptureResult(
+    DesktopCapturer::Result result,
+    std::unique_ptr<DesktopFrame> screen_frame) {
+  const bool do_cache = should_use_screen_capturer_cache_.empty();
+  const bool should_use_screen_capturer = ShouldUseScreenCapturer();
+  if (!should_use_screen_capturer &&
+      screen_magnifier_capturer_ && ShouldUseMagnifier()) {
+    should_use_screen_capturer_cache_.push(true);
+    should_use_screen_capturer_cache_.push(true);
+    RTC_LOG(LS_INFO) << "Window no longer on top when ScreenCapturer finishes, Capture using screen_magnifier_capturer_";
+    screen_magnifier_capturer_->CaptureFrame();
+    return;
+  }
+  if (do_cache) {
+    should_use_screen_capturer_cache_.push(should_use_screen_capturer);
+  }
+
+  CroppingWindowCapturer::OnCaptureResult(result, std::move(screen_frame));
 }
 
 DesktopRect CroppingWindowCapturerWin::GetWindowRectInVirtualScreen() {

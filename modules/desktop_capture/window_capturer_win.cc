@@ -59,10 +59,13 @@ BOOL CALLBACK WindowsEnumerationHandler(HWND hwnd, LPARAM param) {
   // either ApplicationFrameWindow or windows.UI.Core.coreWindow. The
   // associated windows cannot be captured, so we skip them.
   // http://crbug.com/526883.
-  if (rtc::IsWindows8OrLater() &&
-      (wcscmp(class_name, L"ApplicationFrameWindow") == 0 ||
-       wcscmp(class_name, L"Windows.UI.Core.CoreWindow") == 0)) {
-    return TRUE;
+  if (rtc::IsWindows8OrLater()) {
+    if (wcscmp(class_name, L"ApplicationFrameWindow") == 0 && 
+        !ChildWindowsContains(hwnd, L"Windows.UI.Core.CoreWindow")) {
+        return TRUE;
+    } else if (wcscmp(class_name, L"Windows.UI.Core.CoreWindow") == 0) {
+      return TRUE;
+    }
   }
 
   DesktopCapturer::Source window;
