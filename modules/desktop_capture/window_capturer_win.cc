@@ -12,6 +12,7 @@
 
 #include <memory>
 
+#include "modules/desktop_capture/desktop_capture_options.h"
 #include "modules/desktop_capture/desktop_capturer.h"
 #include "modules/desktop_capture/desktop_frame_win.h"
 #include "modules/desktop_capture/win/screen_capture_utils.h"
@@ -28,9 +29,14 @@ namespace webrtc {
 
 namespace {
 
+struct SourceListContext {
+  DesktopCapturer::SourceList list;
+  const bool allow_magnification_api_for_window_capture;
+};
+
 BOOL CALLBACK WindowsEnumerationHandler(HWND hwnd, LPARAM param) {
-  DesktopCapturer::SourceList* list =
-      reinterpret_cast<DesktopCapturer::SourceList*>(param);
+  SourceListContext* context = reinterpret_cast<SourceListContext*>(param);
+  DesktopCapturer::SourceList* list = &context->list;
 
   // Skip windows that are invisible, minimized, have no title, or are owned,
   // unless they have the app window style set.
@@ -67,10 +73,14 @@ BOOL CALLBACK WindowsEnumerationHandler(HWND hwnd, LPARAM param) {
   // either ApplicationFrameWindow or windows.UI.Core.coreWindow. The
   // associated windows cannot be captured, so we skip them.
   // http://crbug.com/526883.
-  if (rtc::IsWindows8OrLater() &&
-      (wcscmp(class_name, L"ApplicationFrameWindow") == 0 ||
-       wcscmp(class_name, L"Windows.UI.Core.CoreWindow") == 0)) {
-    return TRUE;
+  if (rtc::IsWindows8OrLater()) {
+    if (wcscmp(class_name, L"ApplicationFrameWindow") == 0 && 
+        !(context->allow_magnification_api_for_window_capture &&
+          ChildWindowsContains(hwnd, L"Windows.UI.Core.CoreWindow"))) {
+        return TRUE;
+    } else if (wcscmp(class_name, L"Windows.UI.Core.CoreWindow") == 0) {
+      return TRUE;
+    }
   }
 
   DesktopCapturer::Source window;
@@ -121,7 +131,7 @@ bool GetWindowDrawableRect(HWND window,
 
 class WindowCapturerWin : public DesktopCapturer {
  public:
-  WindowCapturerWin();
+  WindowCapturerWin(bool allow_magnification_api_for_window_capture);
   ~WindowCapturerWin() override;
 
   // DesktopCapturer interface.
@@ -149,19 +159,26 @@ class WindowCapturerWin : public DesktopCapturer {
 
   WindowFinderWin window_finder_;
 
+  bool allow_magnification_api_for_window_capture_;
+
   RTC_DISALLOW_COPY_AND_ASSIGN(WindowCapturerWin);
 };
 
-WindowCapturerWin::WindowCapturerWin() {}
+WindowCapturerWin::WindowCapturerWin(
+    bool allow_magnification_api_for_window_capture)
+    : allow_magnification_api_for_window_capture_(
+          allow_magnification_api_for_window_capture) {}
 WindowCapturerWin::~WindowCapturerWin() {}
 
 bool WindowCapturerWin::GetSourceList(SourceList* sources) {
-  SourceList result;
-  LPARAM param = reinterpret_cast<LPARAM>(&result);
+  SourceListContext context = {DesktopCapturer::SourceList(),
+                              allow_magnification_api_for_window_capture_};
+  LPARAM param = reinterpret_cast<LPARAM>(&context);
   // EnumWindows only enumerates root windows.
   if (!EnumWindows(&WindowsEnumerationHandler, param))
     return false;
 
+  DesktopCapturer::SourceList& result = context.list;
   for (auto it = result.begin(); it != result.end();) {
     if (!window_capture_helper_.IsWindowOnCurrentDesktop(
             reinterpret_cast<HWND>(it->id))) {
@@ -353,7 +370,8 @@ void WindowCapturerWin::CaptureFrame() {
 // static
 std::unique_ptr<DesktopCapturer> DesktopCapturer::CreateRawWindowCapturer(
     const DesktopCaptureOptions& options) {
-  return std::unique_ptr<DesktopCapturer>(new WindowCapturerWin());
+  return std::unique_ptr<DesktopCapturer>(new WindowCapturerWin(
+      options.allow_magnification_api_for_window_capture()));
 }
 
 }  // namespace webrtc
