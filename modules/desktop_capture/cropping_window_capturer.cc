@@ -99,9 +99,16 @@ void CroppingWindowCapturer::OnCaptureResult(
     return;
   }
 
-  callback_->OnCaptureResult(
-      Result::SUCCESS,
-      CreateCroppedDesktopFrame(std::move(screen_frame), window_rect));
+  std::unique_ptr<DesktopFrame> cropped_frame =
+      CreateCroppedDesktopFrame(std::move(screen_frame), window_rect);
+
+  if(!cropped_frame.get()) {
+    RTC_LOG(LS_ERROR) << "cropped_frame is null.";
+    callback_->OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
+    return;
+  }
+
+  callback_->OnCaptureResult(Result::SUCCESS, std::move(cropped_frame));
 }
 
 bool CroppingWindowCapturer::IsOccluded(const DesktopVector& pos) {

@@ -157,6 +157,30 @@ bool IsWindowMaximized(HWND window, bool* result) {
   return true;
 }
 
+struct ChildWindowsContainsClassNameContext {
+  BOOL result;
+  LPCTSTR class_name;
+};
+
+BOOL CALLBACK ChildWindowsContainsClassName(HWND hwnd, LPARAM param) {
+  ChildWindowsContainsClassNameContext* context =
+      reinterpret_cast<ChildWindowsContainsClassNameContext*>(param);
+  const size_t kClassLength = 256;
+  WCHAR class_name[kClassLength];
+  const int class_name_length = GetClassNameW(hwnd, class_name, kClassLength);
+  RTC_DCHECK(class_name_length)
+      << "Error retrieving the window's class name";
+  context->result |= wcscmp(class_name, context->class_name) == 0;
+  return !context->result;
+}
+
+bool ChildWindowsContains(HWND parent, LPCTSTR class_name) {
+  ChildWindowsContainsClassNameContext context {false, class_name};
+  LPARAM param = reinterpret_cast<LPARAM>(&context);
+  EnumChildWindows(parent, ChildWindowsContainsClassName, param);
+  return context.result;
+}
+
 // WindowCaptureHelperWin implementation.
 WindowCaptureHelperWin::WindowCaptureHelperWin() {
   // Try to load dwmapi.dll dynamically since it is not available on XP.
