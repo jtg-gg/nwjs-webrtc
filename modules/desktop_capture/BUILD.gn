@@ -409,11 +409,6 @@ rtc_static_library("desktop_capture_generic") {
   }
 
   if (is_win) {
-    cflags_cc = [ 
-      "-Wno-exit-time-destructors",  
-      "-Wno-global-constructors", 
-      "-Wno-thread-safety-analysis",
-    ]
     libs = [
       "d3d11.lib",
       "dxgi.lib",
