@@ -113,6 +113,13 @@ class RTC_EXPORT DesktopCaptureOptions {
   void set_allow_directx_capturer(bool enabled) {
     allow_directx_capturer_ = enabled;
   }
+
+  bool allow_magnification_api_for_window_capture() const {
+    return allow_magnification_api_for_window_capture_;
+  }
+  void set_allow_magnification_api_for_window_capture(bool enabled) {
+    allow_magnification_api_for_window_capture_ = enabled;
+  }
 #endif
 
 #if defined(WEBRTC_USE_PIPEWIRE)
@@ -135,6 +142,7 @@ class RTC_EXPORT DesktopCaptureOptions {
 #if defined(WEBRTC_WIN)
   bool allow_use_magnification_api_ = false;
   bool allow_directx_capturer_ = false;
+  bool allow_magnification_api_for_window_capture_ = false;
 #endif
 #if defined(USE_X11)
   bool use_update_notifications_ = false;

@@ -374,6 +374,9 @@ bool CroppingWindowCapturerWin::ShouldUseScreenCapturer() {
 }
 
 bool CroppingWindowCapturerWin::ShouldUseMagnifier() {
+  if (!options_.allow_magnification_api_for_window_capture())
+    return false;
+
   HWND hwnd = reinterpret_cast<HWND>(selected_window());
   const size_t kClassLength = 256;
   WCHAR class_name[kClassLength];
