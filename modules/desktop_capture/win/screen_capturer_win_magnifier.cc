@@ -145,7 +145,8 @@ bool ScreenCapturerWinMagnifier::SetExcludedWindows(
     const std::vector<WindowId>& windows) {
   if (magnifier_initialized_) {
     BOOL result = set_window_filter_list_func_(
-        magnifier_window_, MW_FILTERMODE_EXCLUDE, windows.size() ? windows.size() : 1,
+        magnifier_window_, MW_FILTERMODE_EXCLUDE,
+        windows.size() ? windows.size() : 1,
         windows.size() ? (HWND*)windows.data() : &magnifier_window_);
     if (!result) {
       RTC_LOG(LS_WARNING) << "error from MagSetWindowFilterList "
@@ -156,6 +157,8 @@ bool ScreenCapturerWinMagnifier::SetExcludedWindows(
   }
   return false;
 }
+
+static ScreenCapturerWinMagnifier* gScreenCapturerWinMagnifier = nullptr;
 
 bool ScreenCapturerWinMagnifier::CaptureImage(const DesktopRect& rect) {
   RTC_DCHECK(magnifier_initialized_);
@@ -177,9 +180,14 @@ bool ScreenCapturerWinMagnifier::CaptureImage(const DesktopRect& rect) {
   RECT native_rect = {rect.left(), rect.top(), rect.right(), rect.bottom()};
 
   TlsSetValue(GetTlsIndex(), this);
+
+  // Store "this" in gScreenCapturerWinMagnifier, TlsGetValue fail on multi monitor
+  RTC_DCHECK(!gScreenCapturerWinMagnifier);
+  gScreenCapturerWinMagnifier = this;
   // OnCaptured will be called via OnMagImageScalingCallback and fill in the
   // frame before set_window_source_func_ returns.
   result = set_window_source_func_(magnifier_window_, native_rect);
+  gScreenCapturerWinMagnifier = nullptr;
 
   if (!result) {
     RTC_LOG_F(LS_WARNING) << "Failed to call MagSetWindowSource: "
@@ -204,7 +212,13 @@ BOOL ScreenCapturerWinMagnifier::OnMagImageScalingCallback(
   ScreenCapturerWinMagnifier* owner =
       reinterpret_cast<ScreenCapturerWinMagnifier*>(TlsGetValue(GetTlsIndex()));
   TlsSetValue(GetTlsIndex(), nullptr);
-  owner->OnCaptured(srcdata, srcheader);
+
+  // owner will be NULL on multi monitor, so just use gScreenCapturerWinMagnifier
+  if (owner) {
+    owner->OnCaptured(srcdata, srcheader);
+  } else {
+    gScreenCapturerWinMagnifier->OnCaptured(srcdata, srcheader);
+  }
 
   return TRUE;
 }

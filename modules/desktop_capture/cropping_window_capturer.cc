@@ -97,9 +97,20 @@ void CroppingWindowCapturer::OnCaptureResult(
     return;
   }
 
-  callback_->OnCaptureResult(
-      Result::SUCCESS,
-      CreateCroppedDesktopFrame(std::move(screen_frame), window_rect));
+  // Apply the magic 3 pixel offset from Magnifier Capturer
+  window_rect.Translate(screen_frame->top_left());
+  // Set the top_left value to its original 0,0
+  screen_frame->set_top_left(DesktopVector());
+  
+  // Handle case where window_rect is outside screen_frame and returns null croppedFrame
+  std::unique_ptr<DesktopFrame> croppedFrame =
+      CreateCroppedDesktopFrame(std::move(screen_frame), window_rect);
+
+  if (croppedFrame) {
+    callback_->OnCaptureResult(Result::SUCCESS, std::move(croppedFrame));
+  } else {
+    callback_->OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
+  }
 }
 
 bool CroppingWindowCapturer::IsOccluded(const DesktopVector& pos) {
