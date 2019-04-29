@@ -66,6 +66,7 @@ class RTC_EXPORT CroppingWindowCapturer : public DesktopCapturer,
   WindowId excluded_window() const { return excluded_window_; }
 
   const DesktopCaptureOptions options_;
+  DesktopVector offset_;
 
  private:
   DesktopCapturer::Callback* callback_;

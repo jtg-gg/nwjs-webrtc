@@ -98,10 +98,9 @@ void CroppingWindowCapturer::OnCaptureResult(
   }
 
   // Apply the magic 3 pixel offset from Magnifier Capturer
-  window_rect.Translate(screen_frame->top_left());
-  // Set the top_left value to its original 0,0
-  screen_frame->set_top_left(DesktopVector());
-  
+  window_rect.Translate(offset_);
+  offset_.set(0, 0);
+
   // Handle case where window_rect is outside screen_frame and returns null croppedFrame
   std::unique_ptr<DesktopFrame> croppedFrame =
       CreateCroppedDesktopFrame(std::move(screen_frame), window_rect);

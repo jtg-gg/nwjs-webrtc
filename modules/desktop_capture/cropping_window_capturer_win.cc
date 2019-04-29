@@ -10,6 +10,7 @@
 
 #include "modules/desktop_capture/cropping_window_capturer.h"
 
+#include <dwmapi.h>
 #include <queue>
 #include "modules/desktop_capture/win/screen_capture_utils.h"
 #include "modules/desktop_capture/win/screen_capturer_win_magnifier.h"
@@ -29,14 +30,18 @@ const size_t kTitleLength = 256;
 // Used to pass input/output data during the EnumWindow call for verifying if
 // the selected window is on top.
 struct TopWindowVerifierContext {
-  TopWindowVerifierContext(HWND selected_window,
-                           HWND excluded_window,
-                           DesktopRect selected_window_rect,
-                           WindowCaptureHelperWin* window_capture_helper)
+  TopWindowVerifierContext(
+      HWND selected_window,
+      HWND excluded_window,
+      DesktopRect selected_window_rect,
+      WindowCaptureHelperWin* window_capture_helper,
+      const bool allow_magnification_api_for_window_capture)
       : selected_window(selected_window),
         excluded_window(excluded_window),
         selected_window_rect(selected_window_rect),
         window_capture_helper(window_capture_helper),
+        allow_magnification_api_for_window_capture(
+            allow_magnification_api_for_window_capture),
         is_top_window(false) {
     RTC_DCHECK_NE(selected_window, excluded_window);
 
@@ -50,6 +55,7 @@ struct TopWindowVerifierContext {
   WindowCaptureHelperWin* window_capture_helper;
   WCHAR selected_window_title[kTitleLength];
   DWORD selected_window_process_id;
+  const bool allow_magnification_api_for_window_capture;
   bool is_top_window;
 };
 
@@ -119,13 +125,16 @@ BOOL CALLBACK TopWindowVerifier(HWND hwnd, LPARAM param) {
     }
   }
 
-  const size_t kClassLength = 256;
-  WCHAR class_name[kClassLength];
-  const int class_name_length = GetClassName(hwnd, class_name, kClassLength);
-  RTC_DCHECK(class_name_length) << "Error retrieving the window's class name";
-  if (wcscmp(class_name, L"Windows.UI.Core.CoreWindow") == 0) { 
-    return TRUE;
+  if (context->allow_magnification_api_for_window_capture) {
+    const size_t kClassLength = 256;
+    WCHAR class_name[kClassLength];
+    const int class_name_length = GetClassName(hwnd, class_name, kClassLength);
+    RTC_DCHECK(class_name_length) << "Error retrieving the window's class name";
+    if (wcscmp(class_name, L"Windows.UI.Core.CoreWindow") == 0) {
+      return TRUE;
+    }
   }
+
   // Checks whether current window |hwnd| intersects with
   // |context|->selected_window.
   // |content_rect| is preferred because,
@@ -192,7 +201,7 @@ rtc::CriticalSection* ScreenCapturerWinMagnifierWorker::singleton_lock_ =
     nullptr;
 
 rtc::RefCountedObject<ScreenCapturerWinMagnifierWorker>*
-    ScreenCapturerWinMagnifierWorker::Get() {
+ScreenCapturerWinMagnifierWorker::Get() {
   if (!singleton_lock_) {
     rtc::CriticalSection* singleton_lock = new rtc::CriticalSection();
     if (InterlockedCompareExchangePointer(
@@ -249,14 +258,13 @@ bool ScreenCapturerWinMagnifierWorker::CaptureFrame(
   std::unique_ptr<DesktopFrame> screen_frame = std::move(screen_frame_);
   DesktopCapturer::Result capture_result = result_;
   capture_lock_.Leave();
-  
-  // Magic 3 pixel offset, store it in screenframe top_left
-  // the value will be used later by CroppingWindowCapturer::OnCaptureResult
-  DCHECK(screen_frame->top_left().equals(DesktopVector()));
-  screen_frame->set_top_left(DesktopVector(3,0));
+
+  if (result == false) {
+    return false;
+  }
 
   callback->OnCaptureResult(capture_result, std::move(screen_frame));
-  return result;
+  return true;
 }
 
 void ScreenCapturerWinMagnifierWorker::OnCaptureResult(
@@ -280,6 +288,7 @@ class CroppingWindowCapturerWin : public CroppingWindowCapturer {
   DesktopRect GetWindowRectInVirtualScreen() override;
   void OnCaptureResult(DesktopCapturer::Result result,
                        std::unique_ptr<DesktopFrame> frame) override;
+  bool CaptureFrameUsingMagnifierApi();
 
   // The region from GetWindowRgn in the desktop coordinate if the region is
   // rectangular, or the rect from GetWindowRect if the region is not set.
@@ -287,6 +296,7 @@ class CroppingWindowCapturerWin : public CroppingWindowCapturer {
 
   WindowCaptureHelperWin window_capture_helper_;
 
+  std::vector<HWND> core_windows_;
   std::queue<bool> should_use_screen_capturer_cache_;
   rtc::scoped_refptr<rtc::RefCountedObject<ScreenCapturerWinMagnifierWorker>>
       screen_magnifier_capturer_worker_;
@@ -380,9 +390,25 @@ bool CroppingWindowCapturerWin::ShouldUseScreenCapturer() {
   // windows, context menus, and |excluded_window_|.
   // |content_rect| is preferred, see the comments in TopWindowVerifier()
   // function.
-  TopWindowVerifierContext context(selected,
-                                   reinterpret_cast<HWND>(excluded_window()),
-                                   content_rect, &window_capture_helper_);
+  TopWindowVerifierContext context(
+      selected, reinterpret_cast<HWND>(excluded_window()), content_rect,
+      &window_capture_helper_,
+      options_.allow_magnification_api_for_window_capture() &&
+          rtc::IsWindows8OrLater());
+
+  if (options_.allow_magnification_api_for_window_capture() &&
+      rtc::IsWindows8OrLater()) {
+    for (auto hwnd : core_windows_) {
+      DesktopRect content_rect;
+      if (GetWindowContentRect(hwnd, &content_rect)) {
+        content_rect.IntersectWith(context.selected_window_rect);
+        if (!content_rect.is_empty()) {
+          return false;
+        }
+      }
+    }
+  }
+
   const LPARAM enum_param = reinterpret_cast<LPARAM>(&context);
   EnumWindows(&TopWindowVerifier, enum_param);
   if (!context.is_top_window) {
@@ -444,15 +470,12 @@ BOOL CALLBACK WindowsTopOfMe(HWND hwnd, LPARAM param) {
   WindowsTopOfMeContext* context =
       reinterpret_cast<WindowsTopOfMeContext*>(param);
 
-  if (hwnd == context->selected_window)
+  if (hwnd == context->selected_window) {
     return FALSE;
+  }
 
   // Ignore invisible window on current desktop.
   if (!context->window_capture_helper->IsWindowVisibleOnCurrentDesktop(hwnd)) {
-    return TRUE;
-  }
-
-  if (context->window_capture_helper->IsWindowChromeNotification(hwnd)) {
     return TRUE;
   }
 
@@ -496,8 +519,45 @@ BOOL CALLBACK WindowsTopOfMe(HWND hwnd, LPARAM param) {
   return TRUE;
 }
 
+bool CroppingWindowCapturerWin::CaptureFrameUsingMagnifierApi() {
+  WindowsTopOfMeContext context(reinterpret_cast<HWND>(selected_window()),
+                                &window_capture_helper_);
+  EnumWindows(&WindowsTopOfMe, reinterpret_cast<LPARAM>(&context));
+
+  for (auto hwnd : core_windows_) {
+    DesktopRect content_rect;
+    if (GetWindowContentRect(hwnd, &content_rect)) {
+      content_rect.IntersectWith(context.selected_window_rect);
+      if (!content_rect.is_empty()) {
+        context.windows_top_of_me.push_back(hwnd);
+      }
+    }
+  }
+
+  // Magic 3 pixel offset if using Magnifier api
+  offset_.set(3, 0);
+  return (screen_magnifier_capturer_worker_->CaptureFrame(
+      this, context.window_ids_top_of_me()));
+}
+
 void CroppingWindowCapturerWin::CaptureFrame() {
   RTC_DCHECK(should_use_screen_capturer_cache_.empty());
+
+  if (options_.allow_magnification_api_for_window_capture() &&
+      rtc::IsWindows8OrLater()) {
+    core_windows_.clear();
+    HWND hWnd = FindWindowEx(NULL, NULL, L"Windows.UI.Core.CoreWindow", NULL);
+    while (hWnd != NULL) {
+      int CloakedVal;
+      HRESULT hRes = DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, &CloakedVal,
+                                           sizeof(CloakedVal));
+      if (hRes == S_OK && CloakedVal == 0) {
+        core_windows_.push_back(hWnd);
+      }
+      hWnd = FindWindowEx(NULL, hWnd, L"Windows.UI.Core.CoreWindow", NULL);
+    }
+  }
+
   if (ShouldUseMagnifier()) {
     const bool should_use_screen_capture = ShouldUseScreenCapturer();
     should_use_screen_capturer_cache_.push(true);
@@ -508,11 +568,7 @@ void CroppingWindowCapturerWin::CaptureFrame() {
         screen_magnifier_capturer_worker_ =
             ScreenCapturerWinMagnifierWorker::Get();
       }
-      WindowsTopOfMeContext context(reinterpret_cast<HWND>(selected_window()),
-                                    &window_capture_helper_);
-      EnumWindows(&WindowsTopOfMe, reinterpret_cast<LPARAM>(&context));
-      if (screen_magnifier_capturer_worker_->CaptureFrame(
-              this, context.window_ids_top_of_me())) {
+      if (CaptureFrameUsingMagnifierApi()) {
         return;
       }
     }
@@ -532,12 +588,9 @@ void CroppingWindowCapturerWin::OnCaptureResult(
     RTC_LOG(LS_INFO) << "Window no longer on top when ScreenCapturer finishes, "
                         "Capture using screen_magnifier_capturer_";
 
-    WindowsTopOfMeContext context(reinterpret_cast<HWND>(selected_window()),
-                                  &window_capture_helper_);
-    EnumWindows(&WindowsTopOfMe, reinterpret_cast<LPARAM>(&context));
-    screen_magnifier_capturer_worker_->CaptureFrame(
-        this, context.window_ids_top_of_me());
-    return;
+    if (CaptureFrameUsingMagnifierApi()) {
+      return;
+    }
   }
   if (do_cache) {
     should_use_screen_capturer_cache_.push(should_use_screen_capturer);
