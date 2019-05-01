@@ -158,8 +158,6 @@ bool ScreenCapturerWinMagnifier::SetExcludedWindows(
   return false;
 }
 
-static ScreenCapturerWinMagnifier* gScreenCapturerWinMagnifier = nullptr;
-
 bool ScreenCapturerWinMagnifier::CaptureImage(const DesktopRect& rect) {
   RTC_DCHECK(magnifier_initialized_);
 
@@ -180,14 +178,9 @@ bool ScreenCapturerWinMagnifier::CaptureImage(const DesktopRect& rect) {
   RECT native_rect = {rect.left(), rect.top(), rect.right(), rect.bottom()};
 
   TlsSetValue(GetTlsIndex(), this);
-
-  // Store "this" in gScreenCapturerWinMagnifier, TlsGetValue fail on multi monitor
-  RTC_DCHECK(!gScreenCapturerWinMagnifier);
-  gScreenCapturerWinMagnifier = this;
   // OnCaptured will be called via OnMagImageScalingCallback and fill in the
   // frame before set_window_source_func_ returns.
   result = set_window_source_func_(magnifier_window_, native_rect);
-  gScreenCapturerWinMagnifier = nullptr;
 
   if (!result) {
     RTC_LOG_F(LS_WARNING) << "Failed to call MagSetWindowSource: "
@@ -213,11 +206,11 @@ BOOL ScreenCapturerWinMagnifier::OnMagImageScalingCallback(
       reinterpret_cast<ScreenCapturerWinMagnifier*>(TlsGetValue(GetTlsIndex()));
   TlsSetValue(GetTlsIndex(), nullptr);
 
-  // owner will be NULL on multi monitor, so just use gScreenCapturerWinMagnifier
+  // OnMagImageScalingCallback might be called 2 times with different clipped RECT
+  // though the data is the same, ignore the later
   if (owner) {
-    owner->OnCaptured(srcdata, srcheader);
-  } else {
-    gScreenCapturerWinMagnifier->OnCaptured(srcdata, srcheader);
+    owner->OnCaptured(srcdata, srcheader,
+                      DesktopVector(unclipped.right - clipped.right, 0));
   }
 
   return TRUE;
@@ -351,7 +344,8 @@ bool ScreenCapturerWinMagnifier::InitializeMagnifier() {
 }
 
 void ScreenCapturerWinMagnifier::OnCaptured(void* data,
-                                            const MAGIMAGEHEADER& header) {
+                                            const MAGIMAGEHEADER& header,
+                                            const DesktopVector& offset) {
   DesktopFrame* current_frame = queue_.current_frame();
 
   // Verify the format.
@@ -377,7 +371,7 @@ void ScreenCapturerWinMagnifier::OnCaptured(void* data,
   current_frame->CopyPixelsFrom(
       reinterpret_cast<uint8_t*>(data), header.stride,
       DesktopRect::MakeXYWH(0, 0, header.width, header.height));
-
+  current_frame->set_top_left(offset);
   magnifier_capture_succeeded_ = true;
 }
 
