@@ -212,8 +212,8 @@ BOOL ScreenCapturerWinMagnifier::OnMagImageScalingCallback(
     owner->OnCaptured(srcdata, srcheader,
                       DesktopVector(unclipped.right - clipped.right, 0));
   }
-
-  return TRUE;
+  // returning false, fix crash on dual monitor vertical configuration
+  return FALSE;
 }
 
 // TODO(zijiehe): These functions are available on Windows Vista or upper, so we
