@@ -344,6 +344,7 @@ class CroppingWindowCapturerWin : public CroppingWindowCapturer {
   bool ShouldUseScreenCapturer() override;
   bool ShouldUseMagnifier();
   void CaptureFrame() override;
+  bool SelectSource(SourceId id) override;
   DesktopRect GetWindowRectInVirtualScreen() override;
   DesktopRect GetWindowRectInVirtualScreen(const bool magnifier);
   void OnCaptureResult(DesktopCapturer::Result result,
@@ -360,6 +361,7 @@ class CroppingWindowCapturerWin : public CroppingWindowCapturer {
   WindowCaptureHelperWin window_capture_helper_;
 
   std::vector<HWND> core_windows_;
+  std::vector<HWND> last_exclusion_windows_;
   std::queue<bool> should_use_screen_capturer_cache_;
   rtc::scoped_refptr<rtc::RefCountedObject<ScreenCapturerWinMagnifierWorker>>
       screen_magnifier_capturer_worker_;
@@ -629,9 +631,28 @@ bool CroppingWindowCapturerWin::CaptureFrameUsingMagnifierApi() {
     }
   }
 
+  if (last_exclusion_windows_.size() &&
+      last_exclusion_windows_ != context.windows_top_of_me) {
+    /*last_exclusion_windows_ = context.windows_top_of_me;
+    CroppingWindowCapturer::OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
+    while (!should_use_screen_capturer_cache_.empty()) {
+      should_use_screen_capturer_cache_.pop();
+    }
+    return true;*/
+    static volatile DWORD sleep_time = 500;
+    RTC_LOG(LS_INFO) << "Sleep for " << sleep_time << "ms";
+    Sleep(sleep_time);
+  }
+
+  last_exclusion_windows_ = context.windows_top_of_me;
   is_using_magnifier_ = true;
   return screen_magnifier_capturer_worker_->CaptureFrame(
       this, context.window_ids_top_of_me());
+}
+
+bool CroppingWindowCapturerWin::SelectSource(SourceId id) {
+  last_exclusion_windows_.clear();
+  return CroppingWindowCapturer::SelectSource(id);
 }
 
 void CroppingWindowCapturerWin::CaptureFrame() {
@@ -649,6 +670,17 @@ void CroppingWindowCapturerWin::CaptureFrame() {
         core_windows_.push_back(hWnd);
       }
       hWnd = FindWindowEx(NULL, hWnd, L"Windows.UI.Core.CoreWindow", NULL);
+    }
+
+    hWnd = FindWindowEx(NULL, NULL, NULL, L"Input Flyout");
+    while (hWnd != NULL) {
+      int CloakedVal;
+      HRESULT hRes = DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, &CloakedVal,
+                                           sizeof(CloakedVal));
+      if (hRes == S_OK && CloakedVal == 0) {
+        core_windows_.push_back(hWnd);
+      }
+      hWnd = FindWindowEx(NULL, hWnd, NULL, L"Input Flyout");
     }
   }
 
