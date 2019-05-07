@@ -214,7 +214,7 @@ ScreenCapturerWinMagnifierWorker::Get() {
   rtc::CritScope lock(singleton_lock_);
   if (singleton_ == nullptr) {
     ScreenId main_screen = kInvalidScreenId;
-    //DesktopRect desktop_rect_screen_0;
+    // DesktopRect desktop_rect_screen_0;
     DesktopRect desktop_rect;
     std::wstring device_key;
 
@@ -224,7 +224,7 @@ ScreenCapturerWinMagnifierWorker::Get() {
       const ScreenId screen_id = screens[i].id;
       if (IsScreenValid(screen_id, &device_key)) {
         desktop_rect = GetScreenRect(screen_id, device_key);
-        //if (screen_id == 0) {
+        // if (screen_id == 0) {
         //  desktop_rect_screen_0 = desktop_rect;
         //}
         if (desktop_rect.top_left().is_zero()) {
@@ -595,6 +595,8 @@ BOOL CALLBACK WindowsTopOfMe(HWND hwnd, LPARAM param) {
   return TRUE;
 }
 
+static const DWORD sleep_transition_time = 150;
+
 bool CroppingWindowCapturerWin::CaptureFrameUsingMagnifierApi() {
   if (!screen_magnifier_capturer_worker_) {
     return false;
@@ -603,7 +605,7 @@ bool CroppingWindowCapturerWin::CaptureFrameUsingMagnifierApi() {
   WindowsTopOfMeContext context(reinterpret_cast<HWND>(selected_window()),
                                 &window_capture_helper_);
   EnumWindows(&WindowsTopOfMe, reinterpret_cast<LPARAM>(&context));
-  
+
   std::vector<HWND> windows = core_windows_;
   HWND hWnd = FindWindowEx(NULL, NULL, L"Shell_TrayWnd", NULL);
   if (hWnd != NULL &&
@@ -615,9 +617,20 @@ bool CroppingWindowCapturerWin::CaptureFrameUsingMagnifierApi() {
       windows.push_back(hWnd);
     }
     hWnd = FindWindowEx(NULL, NULL, L"#32768", NULL);
-    if (hWnd != NULL &&
-        window_capture_helper_.IsWindowVisibleOnCurrentDesktop(hWnd)) {
-      windows.push_back(hWnd);
+    while (hWnd != NULL) {
+      if (window_capture_helper_.IsWindowVisibleOnCurrentDesktop(hWnd)) {
+        windows.push_back(hWnd);
+      }
+      hWnd = FindWindowEx(NULL, hWnd, L"#32768", NULL);
+    }
+    hWnd = FindWindowEx(NULL, NULL, L"tooltips_class32", NULL);
+    while (hWnd != NULL) {
+      DesktopRect window_rect;
+      if (window_capture_helper_.IsWindowVisibleOnCurrentDesktop(hWnd) &&
+          GetWindowRect(hWnd, &window_rect) && !window_rect.is_empty()) {
+        windows.push_back(hWnd);
+      }
+      hWnd = FindWindowEx(NULL, hWnd, L"tooltips_class32", NULL);
     }
   }
 
@@ -633,15 +646,14 @@ bool CroppingWindowCapturerWin::CaptureFrameUsingMagnifierApi() {
 
   if (last_exclusion_windows_.size() &&
       last_exclusion_windows_ != context.windows_top_of_me) {
-    /*last_exclusion_windows_ = context.windows_top_of_me;
+    RTC_DLOG(LS_INFO) << "Sleep for " << sleep_transition_time << "ms";
+    Sleep(sleep_transition_time);
+
+    last_exclusion_windows_ = context.windows_top_of_me;
     CroppingWindowCapturer::OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
-    while (!should_use_screen_capturer_cache_.empty()) {
-      should_use_screen_capturer_cache_.pop();
-    }
-    return true;*/
-    static volatile DWORD sleep_time = 500;
-    RTC_LOG(LS_INFO) << "Sleep for " << sleep_time << "ms";
-    Sleep(sleep_time);
+    // clear cache for next capture frame
+    should_use_screen_capturer_cache_.pop();
+    return true;
   }
 
   last_exclusion_windows_ = context.windows_top_of_me;
@@ -672,7 +684,7 @@ void CroppingWindowCapturerWin::CaptureFrame() {
       hWnd = FindWindowEx(NULL, hWnd, L"Windows.UI.Core.CoreWindow", NULL);
     }
 
-    hWnd = FindWindowEx(NULL, NULL, NULL, L"Input Flyout");
+    hWnd = FindWindowEx(NULL, NULL, L"Shell_InputSwitchTopLevelWindow", NULL);
     while (hWnd != NULL) {
       int CloakedVal;
       HRESULT hRes = DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, &CloakedVal,
@@ -680,7 +692,7 @@ void CroppingWindowCapturerWin::CaptureFrame() {
       if (hRes == S_OK && CloakedVal == 0) {
         core_windows_.push_back(hWnd);
       }
-      hWnd = FindWindowEx(NULL, hWnd, NULL, L"Input Flyout");
+      hWnd = FindWindowEx(NULL, hWnd, L"Shell_InputSwitchTopLevelWindow", NULL);
     }
   }
 
@@ -705,8 +717,20 @@ void CroppingWindowCapturerWin::CaptureFrame() {
       if (CaptureFrameUsingMagnifierApi()) {
         return;
       }
+    } else if (is_using_magnifier_) {
+      // transtion from magnifier to screen capturer
+      RTC_DLOG(LS_INFO)
+          << "transtion from magnifier to screen capturer Sleep for "
+          << sleep_transition_time << "ms";
+      Sleep(sleep_transition_time);
+      is_using_magnifier_ = false;
+      CroppingWindowCapturer::OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
+      last_exclusion_windows_.clear();
+      last_exclusion_windows_.push_back(NULL);
+      return;
     }
   }
+  is_using_magnifier_ = false;
   CroppingWindowCapturer::CaptureFrame();
 }
 
@@ -736,7 +760,6 @@ void CroppingWindowCapturerWin::OnCaptureResult(
   }
 
   CroppingWindowCapturer::OnCaptureResult(result, std::move(screen_frame));
-  is_using_magnifier_ = false;
 }
 
 DesktopRect CroppingWindowCapturerWin::GetWindowRectInVirtualScreen() {
