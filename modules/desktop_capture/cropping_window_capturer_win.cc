@@ -350,6 +350,8 @@ class CroppingWindowCapturerWin : public CroppingWindowCapturer {
   void OnCaptureResult(DesktopCapturer::Result result,
                        std::unique_ptr<DesktopFrame> frame) override;
   bool CaptureFrameUsingMagnifierApi();
+  std::vector<WindowId> GetExlusionList();
+
 
   // The region from GetWindowRgn in the desktop coordinate if the region is
   // rectangular, or the rect from GetWindowRect if the region is not set.
@@ -361,7 +363,7 @@ class CroppingWindowCapturerWin : public CroppingWindowCapturer {
   WindowCaptureHelperWin window_capture_helper_;
 
   std::vector<HWND> core_windows_;
-  std::vector<HWND> last_exclusion_windows_;
+  std::vector<WindowId> last_exclusion_windows_;
   enum BoolCache {
     Empty = -1,
     False, 
@@ -376,7 +378,34 @@ bool CroppingWindowCapturerWin::ShouldUseScreenCapturer() {
   if (should_use_screen_capturer_cache_ != Empty) {
     return should_use_screen_capturer_cache_;
   }
+  
   //RTC_DLOG(INFO) << "ShouldUseScreenCapturer()";
+  if (options_.allow_magnification_api_for_window_capture() &&
+      rtc::IsWindows8OrLater()) {
+    core_windows_.clear();
+    HWND hWnd = FindWindowEx(NULL, NULL, L"Windows.UI.Core.CoreWindow", NULL);
+    while (hWnd != NULL) {
+      int CloakedVal;
+      HRESULT hRes = DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, &CloakedVal,
+                                           sizeof(CloakedVal));
+      if (hRes == S_OK && CloakedVal == 0) {
+        core_windows_.push_back(hWnd);
+      }
+      hWnd = FindWindowEx(NULL, hWnd, L"Windows.UI.Core.CoreWindow", NULL);
+    }
+
+    hWnd = FindWindowEx(NULL, NULL, L"Shell_InputSwitchTopLevelWindow", NULL);
+    while (hWnd != NULL) {
+      int CloakedVal;
+      HRESULT hRes = DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, &CloakedVal,
+                                           sizeof(CloakedVal));
+      if (hRes == S_OK && CloakedVal == 0) {
+        core_windows_.push_back(hWnd);
+      }
+      hWnd = FindWindowEx(NULL, hWnd, L"Shell_InputSwitchTopLevelWindow", NULL);
+    }
+  }
+
   if (!rtc::IsWindows8OrLater() && window_capture_helper_.IsAeroEnabled()) {
     return false;
   }
@@ -600,11 +629,7 @@ BOOL CALLBACK WindowsTopOfMe(HWND hwnd, LPARAM param) {
 
 static const DWORD sleep_transition_time = 150;
 
-bool CroppingWindowCapturerWin::CaptureFrameUsingMagnifierApi() {
-  if (!screen_magnifier_capturer_worker_) {
-    return false;
-  }
-
+std::vector<WindowId> CroppingWindowCapturerWin::GetExlusionList() {
   WindowsTopOfMeContext context(reinterpret_cast<HWND>(selected_window()),
                                 &window_capture_helper_);
   EnumWindows(&WindowsTopOfMe, reinterpret_cast<LPARAM>(&context));
@@ -646,9 +671,16 @@ bool CroppingWindowCapturerWin::CaptureFrameUsingMagnifierApi() {
       }
     }
   }
+  return context.window_ids_top_of_me();
+}
 
+bool CroppingWindowCapturerWin::CaptureFrameUsingMagnifierApi() {
+  if (!screen_magnifier_capturer_worker_) {
+    return false;
+  }
+  std::vector<WindowId> exclusion_windows = GetExlusionList();
   if (last_exclusion_windows_.size() &&
-      last_exclusion_windows_ != context.windows_top_of_me) {
+      last_exclusion_windows_ != exclusion_windows) {
     RTC_DLOG(LS_INFO) << "Sleep for " << sleep_transition_time << "ms";
     Sleep(sleep_transition_time);
 
@@ -662,10 +694,10 @@ bool CroppingWindowCapturerWin::CaptureFrameUsingMagnifierApi() {
     return true;
   }
 
-  last_exclusion_windows_ = context.windows_top_of_me;
+  last_exclusion_windows_ = exclusion_windows;
   is_using_magnifier_ = true;
   return screen_magnifier_capturer_worker_->CaptureFrame(
-      this, context.window_ids_top_of_me());
+      this, last_exclusion_windows_);
 }
 
 bool CroppingWindowCapturerWin::SelectSource(SourceId id) {
@@ -674,32 +706,6 @@ bool CroppingWindowCapturerWin::SelectSource(SourceId id) {
 }
 
 void CroppingWindowCapturerWin::CaptureFrame() {
-  if (options_.allow_magnification_api_for_window_capture() &&
-      rtc::IsWindows8OrLater()) {
-    core_windows_.clear();
-    HWND hWnd = FindWindowEx(NULL, NULL, L"Windows.UI.Core.CoreWindow", NULL);
-    while (hWnd != NULL) {
-      int CloakedVal;
-      HRESULT hRes = DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, &CloakedVal,
-                                           sizeof(CloakedVal));
-      if (hRes == S_OK && CloakedVal == 0) {
-        core_windows_.push_back(hWnd);
-      }
-      hWnd = FindWindowEx(NULL, hWnd, L"Windows.UI.Core.CoreWindow", NULL);
-    }
-
-    hWnd = FindWindowEx(NULL, NULL, L"Shell_InputSwitchTopLevelWindow", NULL);
-    while (hWnd != NULL) {
-      int CloakedVal;
-      HRESULT hRes = DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, &CloakedVal,
-                                           sizeof(CloakedVal));
-      if (hRes == S_OK && CloakedVal == 0) {
-        core_windows_.push_back(hWnd);
-      }
-      hWnd = FindWindowEx(NULL, hWnd, L"Shell_InputSwitchTopLevelWindow", NULL);
-    }
-  }
-
   if (!GetWindowRect(reinterpret_cast<HWND>(selected_window()),
                      &window_region_rect_)) {
     window_region_rect_ = DesktopRect();
@@ -756,6 +762,18 @@ void CroppingWindowCapturerWin::OnCaptureResult(
   }
 
   if (is_using_magnifier_) {
+    std::vector<WindowId> exclusion_windows = GetExlusionList();
+    if (last_exclusion_windows_ != exclusion_windows) {
+      RTC_DLOG(LS_INFO) << "Windows order has changed, during screen_magnifier_capturer";
+      // hack so CroppingWindowCapturer::OnCaptureResult doesn't fallback to
+      // window capturer
+      should_use_screen_capturer_cache_ = True;
+      CroppingWindowCapturer::OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
+      // clear cache for next capture frame
+      should_use_screen_capturer_cache_ = Empty;
+      return;
+    }
+
     offset_ = screen_frame->top_left();
     screen_frame->set_top_left(DesktopVector());
     // hack so CroppingWindowCapturer::OnCaptureResult doesn't fallback to window capturer
