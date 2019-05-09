@@ -24,6 +24,8 @@ void DesktopCapturer::SetSharedMemoryFactory(
 
 void DesktopCapturer::SetExcludedWindow(WindowId window) {}
 
+void DesktopCapturer::Stop() {}
+
 bool DesktopCapturer::GetSourceList(SourceList* sources) {
   return true;
 }
