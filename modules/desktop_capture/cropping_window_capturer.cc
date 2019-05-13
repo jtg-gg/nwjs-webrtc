@@ -44,10 +44,8 @@ void CroppingWindowCapturer::CaptureFrame() {
       }
       screen_capturer_->Start(this);
     }
-    RTC_LOG(LS_INFO) << "Capture using screen_capturer_";
     screen_capturer_->CaptureFrame();
   } else {
-    RTC_LOG(LS_INFO) << "Capture using window_capturer_";
     window_capturer_->CaptureFrame();
   }
 }
@@ -79,7 +77,7 @@ void CroppingWindowCapturer::OnCaptureResult(
     DesktopCapturer::Result result,
     std::unique_ptr<DesktopFrame> screen_frame) {
   if (!ShouldUseScreenCapturer()) {
-    RTC_LOG(LS_INFO) << "Window no longer on top when ScreenCapturer finishes, capture using window_capturer_";
+    RTC_LOG(LS_INFO) << "Window no longer on top when ScreenCapturer finishes";
     window_capturer_->CaptureFrame();
     return;
   }
