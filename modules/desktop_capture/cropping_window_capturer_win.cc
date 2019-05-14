@@ -337,17 +337,15 @@ class WindowsTopOfMeWorker : rtc::Runnable {
   WindowsTopOfMeWorker(WindowCaptureHelperWin* window_capture_helper);
   void SelectWindow(HWND window, const bool is_using_magnifier);
   bool IsChanged(uint32_t in_last_ms);
-  
+
   // used by ShouldUseScreenCapture
-  std::vector<HWND> core_windows() {
-    return core_windows_;
-  }
-  
+  std::vector<HWND> core_windows() { return core_windows_; }
+
   // used by Magnifier Capturer
   std::vector<WindowId> exclusion_window_list() {
     return reinterpret_cast<std::vector<WindowId>&>(exclusion_window_list_);
   }
-  
+
   static const uint32_t kLastMsThreshold;
 
  private:
@@ -503,7 +501,7 @@ bool CroppingWindowCapturerWin::ShouldUseScreenCapturer() {
       options_.allow_magnification_api_for_window_capture() &&
           rtc::IsWindows8OrLater());
 
-  if (windows_top_of_me_worker_ && rtc::IsWindows8OrLater()) {
+  if (windows_top_of_me_worker_) {
     for (auto hwnd : windows_top_of_me_worker_->core_windows()) {
       DesktopRect content_rect;
       if (GetWindowContentRect(hwnd, &content_rect)) {
@@ -547,7 +545,8 @@ struct WindowsTopOfMeContext {
   WindowsTopOfMeContext(HWND selected_window,
                         WindowCaptureHelperWin* window_capture_helper)
       : selected_window(selected_window),
-        window_capture_helper(window_capture_helper) {
+        window_capture_helper(window_capture_helper),
+        window_is_moving(false) {
     GetWindowText(selected_window, selected_window_title, kTitleLength);
     GetWindowThreadProcessId(selected_window, &selected_window_process_id);
     GetWindowContentRect(selected_window, &selected_window_rect);
@@ -558,6 +557,7 @@ struct WindowsTopOfMeContext {
   DesktopRect selected_window_rect;
   WCHAR selected_window_title[kTitleLength];
   DWORD selected_window_process_id;
+  bool window_is_moving;
   std::vector<HWND> windows_top_of_me;
 };
 
@@ -603,6 +603,16 @@ BOOL CALLBACK WindowsTopOfMe(HWND hwnd, LPARAM param) {
     return TRUE;
   }
 
+  if (!context->window_is_moving) {
+    GUITHREADINFO gui;
+    gui.cbSize = sizeof(GUITHREADINFO);
+    if (GetGUIThreadInfo(GetWindowThreadProcessId(hwnd, NULL), &gui)) {
+      if (gui.flags & GUI_INMOVESIZE) {
+        context->window_is_moving = true;
+      }
+    }
+  }
+
   content_rect.IntersectWith(context->selected_window_rect);
 
   // If intersection empty, ignore
@@ -625,7 +635,7 @@ WindowsTopOfMeWorker::WindowsTopOfMeWorker(
       last_changed_(0) {}
 
 void WindowsTopOfMeWorker::SelectWindow(HWND window,
-                                     const bool is_using_magnifier) {
+                                        const bool is_using_magnifier) {
   selected_window_ = window;
   if (is_using_magnifier) {
     Run(NULL);
@@ -637,18 +647,13 @@ void WindowsTopOfMeWorker::SelectWindow(HWND window,
 }
 
 void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
-  HRESULT hr = S_FALSE;
-  if (thread) {
-    hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-  }
   do {
     std::vector<HWND> windows;
     if (rtc::IsWindows8OrLater()) {
       const WCHAR* string_class[] = {L"Windows.UI.Core.CoreWindow",
                                      L"Shell_InputSwitchTopLevelWindow"};
       for (auto s : string_class) {
-        HWND hWnd =
-            FindWindowEx(NULL, NULL, s, NULL);
+        HWND hWnd = FindWindowEx(NULL, NULL, s, NULL);
         while (hWnd != NULL) {
           int CloakedVal;
           HRESULT hRes = DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, &CloakedVal,
@@ -659,8 +664,23 @@ void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
           hWnd = FindWindowEx(NULL, hWnd, s, NULL);
         }
       }
-      core_windows_ = windows;
     }
+    HWND hWnd = FindWindowEx(NULL, NULL, L"Shell_TrayWnd", NULL);
+    if (hWnd != NULL &&
+        window_capture_helper_->IsWindowVisibleOnCurrentDesktop(hWnd)) {
+      const WCHAR* string_class[] = {L"TaskListThumbnailWnd", L"#32768",
+                                     L"tooltips_class32"};
+      for (auto s : string_class) {
+        hWnd = FindWindowEx(NULL, NULL, s, NULL);
+        while (hWnd != NULL) {
+          if (window_capture_helper_->IsWindowVisibleOnCurrentDesktop(hWnd)) {
+            windows.push_back(hWnd);
+          }
+          hWnd = FindWindowEx(NULL, hWnd, s, NULL);
+        }
+      }
+    }
+    core_windows_ = windows;
 
     WindowsTopOfMeContext context(selected_window_, window_capture_helper_);
     EnumWindows(&WindowsTopOfMe, reinterpret_cast<LPARAM>(&context));
@@ -670,29 +690,6 @@ void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
       auto it = std::find(windows.begin(), windows.end(), hWnd);
       if (it != windows.end()) {
         windows.erase(it);
-      }
-    }
-
-    HWND hWnd = FindWindowEx(NULL, NULL, L"Shell_TrayWnd", NULL);
-    if (hWnd != NULL &&
-        window_capture_helper_->IsWindowVisibleOnCurrentDesktop(hWnd)) {
-      const std::vector<HWND>& vec = context.windows_top_of_me;
-      if (std::find(vec.begin(), vec.end(), hWnd) == vec.end()) {
-        windows.push_back(hWnd);
-      }
-
-      const WCHAR* string_class[] = {L"TaskListThumbnailWnd", L"#32768",
-                                     L"tooltips_class32"};
-
-      for (auto s : string_class) {
-        hWnd = FindWindowEx(NULL, NULL, s, NULL);
-        while (hWnd != NULL) {
-          if (std::find(vec.begin(), vec.end(), hWnd) == vec.end() &&
-              window_capture_helper_->IsWindowVisibleOnCurrentDesktop(hWnd)) {
-            windows.push_back(hWnd);
-          }
-          hWnd = FindWindowEx(NULL, hWnd, s, NULL);
-        }
       }
     }
 
@@ -706,7 +703,7 @@ void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
       }
     }
 
-    if (exclusion_window_list_ != context.windows_top_of_me) {
+    if (context.window_is_moving || exclusion_window_list_ != context.windows_top_of_me) {
       exclusion_window_list_ = context.windows_top_of_me;
       last_changed_ = rtc::Time32();
     }
@@ -715,9 +712,6 @@ void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
       Sleep(1000 / kFps);
     }
   } while (thread && !thread->IsQuitting());
-  if (hr == S_OK) {
-    CoUninitialize();
-  }
 }
 
 bool WindowsTopOfMeWorker::IsChanged(uint32_t in_last_ms) {
@@ -773,8 +767,8 @@ bool CroppingWindowCapturerWin::SelectSource(SourceId id) {
   }
 
   if (windows_top_of_me_worker_) {
-    windows_top_of_me_worker_->SelectWindow(hwnd,
-                                         selected_window_should_use_magnifier_);
+    windows_top_of_me_worker_->SelectWindow(
+        hwnd, selected_window_should_use_magnifier_);
   }
 
   return CroppingWindowCapturer::SelectSource(id);
