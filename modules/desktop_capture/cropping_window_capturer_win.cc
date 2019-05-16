@@ -565,6 +565,16 @@ BOOL CALLBACK WindowsTopOfMe(HWND hwnd, LPARAM param) {
   WindowsTopOfMeContext* context =
       reinterpret_cast<WindowsTopOfMeContext*>(param);
 
+  if (!context->window_is_moving) {
+    GUITHREADINFO gui;
+    gui.cbSize = sizeof(GUITHREADINFO);
+    if (GetGUIThreadInfo(GetWindowThreadProcessId(hwnd, NULL), &gui)) {
+      if (gui.flags & GUI_INMOVESIZE) {
+        context->window_is_moving = true;
+      }
+    }
+  }
+
   if (hwnd == context->selected_window) {
     return FALSE;
   }
@@ -601,16 +611,6 @@ BOOL CALLBACK WindowsTopOfMe(HWND hwnd, LPARAM param) {
   if (!GetWindowContentRect(hwnd, &content_rect)) {
     // Bail out if failed to get the window area.
     return TRUE;
-  }
-
-  if (!context->window_is_moving) {
-    GUITHREADINFO gui;
-    gui.cbSize = sizeof(GUITHREADINFO);
-    if (GetGUIThreadInfo(GetWindowThreadProcessId(hwnd, NULL), &gui)) {
-      if (gui.flags & GUI_INMOVESIZE) {
-        context->window_is_moving = true;
-      }
-    }
   }
 
   content_rect.IntersectWith(context->selected_window_rect);
@@ -651,7 +651,8 @@ void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
     std::vector<HWND> windows;
     if (rtc::IsWindows8OrLater()) {
       const WCHAR* string_class[] = {L"Windows.UI.Core.CoreWindow",
-                                     L"Shell_InputSwitchTopLevelWindow"};
+                                     L"Shell_InputSwitchTopLevelWindow", 
+                                     L"Xaml_WindowedPopupClass"};
       for (auto s : string_class) {
         HWND hWnd = FindWindowEx(NULL, NULL, s, NULL);
         while (hWnd != NULL) {
@@ -669,7 +670,7 @@ void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
     if (hWnd != NULL &&
         window_capture_helper_->IsWindowVisibleOnCurrentDesktop(hWnd)) {
       const WCHAR* string_class[] = {L"TaskListThumbnailWnd", L"#32768",
-                                     L"tooltips_class32"};
+                                     L"tooltips_class32", L"SysShadow"};
       for (auto s : string_class) {
         hWnd = FindWindowEx(NULL, NULL, s, NULL);
         while (hWnd != NULL) {
@@ -865,7 +866,7 @@ void CroppingWindowCapturerWin::OnCaptureResult(
     return;
   }
 
-  if (capturer_ == Magnifier) {
+  if (capturer_ == Magnifier && screen_frame) {
     offset_ = screen_frame->top_left();
     screen_frame->set_top_left(DesktopVector());
   }
