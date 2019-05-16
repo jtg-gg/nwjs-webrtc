@@ -27,7 +27,19 @@ namespace webrtc {
 namespace {
 
 const size_t kTitleLength = 256;
+const size_t kClassLength = 256;
+const WCHAR* window_special_class[] = {
+    L"#32768", L"tooltips_class32", L"Xaml_WindowedPopupClass"};
 
+BOOL IsAncestor(HWND child, const HWND ancestor) {
+  while (child != NULL) {
+    child = GetParent(child);
+    if (child == ancestor) {
+      return TRUE;
+    }
+  } 
+  return FALSE;
+}
 // Used to pass input/output data during the EnumWindow call for verifying if
 // the selected window is on top.
 struct TopWindowVerifierContext {
@@ -108,6 +120,22 @@ BOOL CALLBACK TopWindowVerifier(HWND hwnd, LPARAM param) {
     return TRUE;
   }
 
+  if (context->allow_magnification_api_for_window_capture) {
+    WCHAR class_name[kClassLength];
+    const int class_name_length = GetClassName(hwnd, class_name, kClassLength);
+    RTC_DCHECK(class_name_length) << "Error retrieving the window's class name";
+    if (wcscmp(class_name, L"Windows.UI.Core.CoreWindow") == 0) {
+      return TRUE;
+    }
+    for (auto s : window_special_class) {
+      if (wcscmp(class_name, s) == 0) {
+        if (IsAncestor(hwnd, context->selected_window)) {
+          return TRUE;
+        }
+      }
+    }
+  }
+
   // If |hwnd| has no title or has same title as the selected window (i.e.
   // Window Media Player consisting of several sibling windows) and belongs to
   // the same process, assume it's a tooltip or context menu or sibling window
@@ -122,16 +150,6 @@ BOOL CALLBACK TopWindowVerifier(HWND hwnd, LPARAM param) {
     DWORD enumerated_window_process_id;
     GetWindowThreadProcessId(hwnd, &enumerated_window_process_id);
     if (context->selected_window_process_id == enumerated_window_process_id) {
-      return TRUE;
-    }
-  }
-
-  if (context->allow_magnification_api_for_window_capture) {
-    const size_t kClassLength = 256;
-    WCHAR class_name[kClassLength];
-    const int class_name_length = GetClassName(hwnd, class_name, kClassLength);
-    RTC_DCHECK(class_name_length) << "Error retrieving the window's class name";
-    if (wcscmp(class_name, L"Windows.UI.Core.CoreWindow") == 0) {
       return TRUE;
     }
   }
@@ -596,6 +614,16 @@ BOOL CALLBACK WindowsTopOfMe(HWND hwnd, LPARAM param) {
     return TRUE;
   }
 
+  WCHAR class_name[kClassLength];
+  GetClassName(hwnd, class_name, kClassLength);
+  for (auto s : window_special_class) {
+    if (wcscmp(class_name, s) == 0) {
+      if (IsAncestor(hwnd, context->selected_window)) {
+        return TRUE;
+      }
+    }
+  }
+
   WCHAR window_title[kTitleLength];
   GetWindowText(hwnd, window_title, kTitleLength);
   if (wcsnlen_s(window_title, kTitleLength) == 0 ||
@@ -651,8 +679,7 @@ void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
     std::vector<HWND> windows;
     if (rtc::IsWindows8OrLater()) {
       const WCHAR* string_class[] = {L"Windows.UI.Core.CoreWindow",
-                                     L"Shell_InputSwitchTopLevelWindow", 
-                                     L"Xaml_WindowedPopupClass"};
+                                     L"Shell_InputSwitchTopLevelWindow"};
       for (auto s : string_class) {
         HWND hWnd = FindWindowEx(NULL, NULL, s, NULL);
         while (hWnd != NULL) {
@@ -666,15 +693,20 @@ void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
         }
       }
     }
+    WindowsTopOfMeContext context(selected_window_, window_capture_helper_);
     HWND hWnd = FindWindowEx(NULL, NULL, L"Shell_TrayWnd", NULL);
     if (hWnd != NULL &&
         window_capture_helper_->IsWindowVisibleOnCurrentDesktop(hWnd)) {
-      const WCHAR* string_class[] = {L"TaskListThumbnailWnd", L"#32768",
-                                     L"tooltips_class32", L"SysShadow"};
+      windows.push_back(hWnd);
+      const WCHAR* string_class[] = {
+          L"TaskListThumbnailWnd",
+          L"#32768", L"tooltips_class32", L"Xaml_WindowedPopupClass",
+          L"SysShadow"};
       for (auto s : string_class) {
         hWnd = FindWindowEx(NULL, NULL, s, NULL);
         while (hWnd != NULL) {
-          if (window_capture_helper_->IsWindowVisibleOnCurrentDesktop(hWnd)) {
+          if (!IsAncestor(hWnd, selected_window_) &&
+              window_capture_helper_->IsWindowVisibleOnCurrentDesktop(hWnd)) {
             windows.push_back(hWnd);
           }
           hWnd = FindWindowEx(NULL, hWnd, s, NULL);
@@ -683,10 +715,10 @@ void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
     }
     core_windows_ = windows;
 
-    WindowsTopOfMeContext context(selected_window_, window_capture_helper_);
     EnumWindows(&WindowsTopOfMe, reinterpret_cast<LPARAM>(&context));
 
-    // remove hwnd from windows vector if it is already in the context.windows_top_of_me
+    // remove hwnd from windows vector if it is already in the
+    // context.windows_top_of_me
     for (auto hWnd : context.windows_top_of_me) {
       auto it = std::find(windows.begin(), windows.end(), hWnd);
       if (it != windows.end()) {
@@ -704,7 +736,8 @@ void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
       }
     }
 
-    if (context.window_is_moving || exclusion_window_list_ != context.windows_top_of_me) {
+    if (context.window_is_moving ||
+        exclusion_window_list_ != context.windows_top_of_me) {
       exclusion_window_list_ = context.windows_top_of_me;
       last_changed_ = rtc::Time32();
     }
@@ -746,7 +779,6 @@ bool CroppingWindowCapturerWin::CaptureFrameUsingMagnifierApi() {
 bool CroppingWindowCapturerWin::SelectSource(SourceId id) {
   capturer_ = Unknown;
   HWND hwnd = reinterpret_cast<HWND>(id);
-  const size_t kClassLength = 256;
   WCHAR class_name[kClassLength];
   const int class_name_length = GetClassName(hwnd, class_name, kClassLength);
   RTC_DCHECK(class_name_length)
