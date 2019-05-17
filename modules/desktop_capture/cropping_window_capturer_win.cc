@@ -730,7 +730,7 @@ void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
       last_changed_ = rtc::Time32();
     }
 
-    if (thread) {
+    if (thread && !thread->IsQuitting()) {
       event_.Set();
       event_.Reset();
       event_.Wait(1000 / kFps);
