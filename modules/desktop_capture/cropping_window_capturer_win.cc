@@ -28,16 +28,54 @@ namespace {
 
 const size_t kTitleLength = 256;
 const size_t kClassLength = 256;
-const WCHAR* window_special_class[] = {
-    L"#32768", L"tooltips_class32", L"Xaml_WindowedPopupClass"};
 
-BOOL IsAncestor(HWND child, const HWND ancestor) {
-  while (child != NULL) {
-    child = GetParent(child);
-    if (child == ancestor) {
+BOOL IsAncestor(const HWND ancestor,
+                const WCHAR* ancestor_title,
+                const DWORD ancestor_prcess_id,
+                const HWND hwnd,
+                const bool allow_magnification_api_for_window_capture) {
+  // Ignore descendant windows since we want to capture them.
+  // This check does not work for tooltips and context menus. Drop down menus
+  // and popup windows are fine.
+  //
+  // GA_ROOT returns the root window instead of the owner. I.e. for a dialog
+  // window, GA_ROOT returns the dialog window itself. GA_ROOTOWNER returns the
+  // application main window which opens the dialog window. Since we are sharing
+  // the application main window, GA_ROOT should be used here.
+  if (GetAncestor(hwnd, GA_ROOT) == ancestor) {
+    return TRUE;
+  }
+
+  // If |hwnd| has no title or has same title as the selected window (i.e.
+  // Window Media Player consisting of several sibling windows) and belongs to
+  // the same process, assume it's a tooltip or context menu or sibling window
+  // from the selected window and ignore it.
+  // TODO(zijiehe): This check cannot cover the case where tooltip or context
+  // menu of the child-window is covering the main window. See
+  // https://bugs.chromium.org/p/webrtc/issues/detail?id=8062 for details.
+  WCHAR window_title[kTitleLength];
+  GetWindowText(hwnd, window_title, kTitleLength);
+  if (wcsnlen_s(window_title, kTitleLength) == 0 ||
+      wcscmp(window_title, ancestor_title) == 0) {
+    DWORD enumerated_window_process_id;
+    GetWindowThreadProcessId(hwnd, &enumerated_window_process_id);
+    if (ancestor_prcess_id == enumerated_window_process_id) {
       return TRUE;
     }
-  } 
+  }
+
+  if (allow_magnification_api_for_window_capture) {
+    // Xaml_WindowedPopupClass has "PopupHost" title, and different process id
+    // hence we need to iterate using GetParent to confirm the ancestry
+    HWND it = hwnd;
+    while (it != NULL) {
+      it = GetParent(it);
+      if (it == ancestor) {
+        // we don't won't to capture child window that is resizeable / WS_THICKFRAME 
+        return !(GetWindowLongPtr(hwnd, GWL_STYLE) & WS_THICKFRAME);
+      }
+    }
+  }
   return FALSE;
 }
 // Used to pass input/output data during the EnumWindow call for verifying if
@@ -108,15 +146,9 @@ BOOL CALLBACK TopWindowVerifier(HWND hwnd, LPARAM param) {
     return TRUE;
   }
 
-  // Ignore descendant windows since we want to capture them.
-  // This check does not work for tooltips and context menus. Drop down menus
-  // and popup windows are fine.
-  //
-  // GA_ROOT returns the root window instead of the owner. I.e. for a dialog
-  // window, GA_ROOT returns the dialog window itself. GA_ROOTOWNER returns the
-  // application main window which opens the dialog window. Since we are sharing
-  // the application main window, GA_ROOT should be used here.
-  if (GetAncestor(hwnd, GA_ROOT) == context->selected_window) {
+  if (IsAncestor(context->selected_window, context->selected_window_title,
+                 context->selected_window_process_id, hwnd,
+                 context->allow_magnification_api_for_window_capture)) {
     return TRUE;
   }
 
@@ -125,31 +157,6 @@ BOOL CALLBACK TopWindowVerifier(HWND hwnd, LPARAM param) {
     const int class_name_length = GetClassName(hwnd, class_name, kClassLength);
     RTC_DCHECK(class_name_length) << "Error retrieving the window's class name";
     if (wcscmp(class_name, L"Windows.UI.Core.CoreWindow") == 0) {
-      return TRUE;
-    }
-    for (auto s : window_special_class) {
-      if (wcscmp(class_name, s) == 0) {
-        if (IsAncestor(hwnd, context->selected_window)) {
-          return TRUE;
-        }
-      }
-    }
-  }
-
-  // If |hwnd| has no title or has same title as the selected window (i.e.
-  // Window Media Player consisting of several sibling windows) and belongs to
-  // the same process, assume it's a tooltip or context menu or sibling window
-  // from the selected window and ignore it.
-  // TODO(zijiehe): This check cannot cover the case where tooltip or context
-  // menu of the child-window is covering the main window. See
-  // https://bugs.chromium.org/p/webrtc/issues/detail?id=8062 for details.
-  WCHAR window_title[kTitleLength];
-  GetWindowText(hwnd, window_title, kTitleLength);
-  if (wcsnlen_s(window_title, kTitleLength) == 0 ||
-      wcscmp(window_title, context->selected_window_title) == 0) {
-    DWORD enumerated_window_process_id;
-    GetWindowThreadProcessId(hwnd, &enumerated_window_process_id);
-    if (context->selected_window_process_id == enumerated_window_process_id) {
       return TRUE;
     }
   }
@@ -357,7 +364,14 @@ class WindowsTopOfMeWorker : rtc::Runnable {
   bool IsChanged(uint32_t in_last_ms);
 
   // used by ShouldUseScreenCapture
-  std::vector<HWND> core_windows() { return core_windows_; }
+  std::vector<HWND> core_windows() { 
+    if (thread_) {
+      event_.Set();
+      event_.Reset();
+      event_.Wait(rtc::Event::kForever);
+    }
+    return core_windows_; 
+  }
 
   // used by Magnifier Capturer
   std::vector<WindowId> exclusion_window_list() {
@@ -370,6 +384,7 @@ class WindowsTopOfMeWorker : rtc::Runnable {
   void Run(rtc::Thread* thread) override;
   int ignore_counter_;
   std::unique_ptr<rtc::Thread> thread_;
+  rtc::Event event_;
   WindowCaptureHelperWin* window_capture_helper_;
   HWND selected_window_;
   std::vector<HWND> core_windows_;
@@ -602,37 +617,9 @@ BOOL CALLBACK WindowsTopOfMe(HWND hwnd, LPARAM param) {
     return TRUE;
   }
 
-  // Ignore descendant windows since we want to capture them.
-  // This check does not work for tooltips and context menus. Drop down menus
-  // and popup windows are fine.
-  //
-  // GA_ROOT returns the root window instead of the owner. I.e. for a dialog
-  // window, GA_ROOT returns the dialog window itself. GA_ROOTOWNER returns the
-  // application main window which opens the dialog window. Since we are sharing
-  // the application main window, GA_ROOT should be used here.
-  if (GetAncestor(hwnd, GA_ROOT) == context->selected_window) {
+  if (IsAncestor(context->selected_window, context->selected_window_title,
+                 context->selected_window_process_id, hwnd, true)) {
     return TRUE;
-  }
-
-  WCHAR class_name[kClassLength];
-  GetClassName(hwnd, class_name, kClassLength);
-  for (auto s : window_special_class) {
-    if (wcscmp(class_name, s) == 0) {
-      if (IsAncestor(hwnd, context->selected_window)) {
-        return TRUE;
-      }
-    }
-  }
-
-  WCHAR window_title[kTitleLength];
-  GetWindowText(hwnd, window_title, kTitleLength);
-  if (wcsnlen_s(window_title, kTitleLength) == 0 ||
-      wcscmp(window_title, context->selected_window_title) == 0) {
-    DWORD enumerated_window_process_id;
-    GetWindowThreadProcessId(hwnd, &enumerated_window_process_id);
-    if (context->selected_window_process_id == enumerated_window_process_id) {
-      return TRUE;
-    }
   }
 
   DesktopRect content_rect;
@@ -698,14 +685,15 @@ void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
     if (hWnd != NULL &&
         window_capture_helper_->IsWindowVisibleOnCurrentDesktop(hWnd)) {
       windows.push_back(hWnd);
-      const WCHAR* string_class[] = {
-          L"TaskListThumbnailWnd",
-          L"#32768", L"tooltips_class32", L"Xaml_WindowedPopupClass",
-          L"SysShadow"};
+      // these classes sometimes are not enumerated by "EnumWindows"
+      const WCHAR* string_class[] = {L"TaskListThumbnailWnd", L"#32768",
+                                     L"tooltips_class32",
+                                     L"Xaml_WindowedPopupClass", L"SysShadow"};
       for (auto s : string_class) {
         hWnd = FindWindowEx(NULL, NULL, s, NULL);
         while (hWnd != NULL) {
-          if (!IsAncestor(hWnd, selected_window_) &&
+          if (!IsAncestor(selected_window_, context.selected_window_title,
+                          context.selected_window_process_id, hWnd, true) &&
               window_capture_helper_->IsWindowVisibleOnCurrentDesktop(hWnd)) {
             windows.push_back(hWnd);
           }
@@ -743,7 +731,9 @@ void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
     }
 
     if (thread) {
-      Sleep(1000 / kFps);
+      event_.Set();
+      event_.Reset();
+      event_.Wait(1000 / kFps);
     }
   } while (thread && !thread->IsQuitting());
 }
