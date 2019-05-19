@@ -31,7 +31,7 @@ const size_t kClassLength = 256;
 
 BOOL IsAncestor(const HWND ancestor,
                 const WCHAR* ancestor_title,
-                const DWORD ancestor_prcess_id,
+                const DWORD ancestor_process_id,
                 const HWND hwnd,
                 const bool allow_magnification_api_for_window_capture) {
   // Ignore descendant windows since we want to capture them.
@@ -59,7 +59,7 @@ BOOL IsAncestor(const HWND ancestor,
       wcscmp(window_title, ancestor_title) == 0) {
     DWORD enumerated_window_process_id;
     GetWindowThreadProcessId(hwnd, &enumerated_window_process_id);
-    if (ancestor_prcess_id == enumerated_window_process_id) {
+    if (ancestor_process_id == enumerated_window_process_id) {
       return TRUE;
     }
   }
@@ -71,8 +71,8 @@ BOOL IsAncestor(const HWND ancestor,
     while (it != NULL) {
       it = GetParent(it);
       if (it == ancestor) {
-        // we don't won't to capture child window that is resizeable / WS_THICKFRAME 
-        return !(GetWindowLongPtr(hwnd, GWL_STYLE) & WS_THICKFRAME);
+        // we don't won't to capture child window that has titlebar / WS_CAPTION 
+        return !(GetWindowLongPtr(hwnd, GWL_STYLE) & WS_CAPTION);
       }
     }
   }
@@ -332,7 +332,8 @@ bool ScreenCapturerWinMagnifierWorker::CaptureFrame(
     } else {
       bool res = screen_magnifier_capturer_->SetExcludedWindows(
           std::vector<WindowId>());
-      RTC_DCHECK(res);
+      RTC_DCHECK(res)
+          << "screen_magnifier_capturer_->SetExcludedWindows failed";
     }
     event.Set();
   });
@@ -352,7 +353,7 @@ bool ScreenCapturerWinMagnifierWorker::CaptureFrame(
 void ScreenCapturerWinMagnifierWorker::OnCaptureResult(
     DesktopCapturer::Result result,
     std::unique_ptr<DesktopFrame> screen_frame) {
-  DCHECK(!screen_frame_);
+  RTC_DCHECK(!screen_frame_) << "screen_frame_ should be NULL";
   result_ = result;
   screen_frame_ = std::move(screen_frame);
 }
@@ -762,6 +763,7 @@ bool CroppingWindowCapturerWin::CaptureFrameUsingMagnifierApi() {
   std::vector<WindowId> exclusion_windows =
       windows_top_of_me_worker_->exclusion_window_list();
   capturer_ = Magnifier;
+  RTC_DLOG(LS_INFO) << "Captured using " << capturer_;
   return screen_magnifier_capturer_worker_->CaptureFrame(this,
                                                          exclusion_windows);
 }
@@ -815,7 +817,7 @@ void CroppingWindowCapturerWin::CaptureFrame() {
   if (windows_top_of_me_worker_ &&
       windows_top_of_me_worker_->IsChanged(
           WindowsTopOfMeWorker::kLastMsThreshold)) {
-    RTC_DLOG(LS_INFO) << "Windows order was changed, during the past"
+    RTC_DLOG(LS_INFO) << "Windows order was changed, during the past "
                       << WindowsTopOfMeWorker::kLastMsThreshold << " ms";
 
     // hack so CroppingWindowCapturer::OnCaptureResult doesn't fallback to
@@ -826,8 +828,8 @@ void CroppingWindowCapturerWin::CaptureFrame() {
     return;
   }
 
-  RTC_DLOG(LS_INFO) << "Captured using " << capturer_;
-  RTC_DCHECK(should_use_screen_capturer_cache_ == Empty);
+  RTC_DCHECK(should_use_screen_capturer_cache_ == Empty)
+      << "should_use_screen_capturer_cache_ should be Empty";
   should_use_screen_capturer_cache_ = ShouldUseScreenCapturer() ? True : False;
 
   if (ShouldUseMagnifier() && !cant_get_screen_magnifier_capturer_worker_) {
@@ -868,6 +870,7 @@ void CroppingWindowCapturerWin::CaptureFrame() {
     default:
       capturer_ = Unknown;
   }
+  RTC_DLOG(LS_INFO) << "Captured using " << capturer_;
   CroppingWindowCapturer::CaptureFrame();
   should_use_screen_capturer_cache_ = Empty;
 }
