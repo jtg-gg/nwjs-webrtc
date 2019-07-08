@@ -23,7 +23,7 @@ D3dDevice::D3dDevice(const D3dDevice& other) = default;
 D3dDevice::D3dDevice(D3dDevice&& other) = default;
 D3dDevice::~D3dDevice() = default;
 
-bool D3dDevice::Initialize(const ComPtr<IDXGIAdapter>& adapter) {
+bool D3dDevice::Initialize(const ComPtr<IDXGIAdapter>& adapter, const UINT flags) {
   dxgi_adapter_ = adapter;
   if (!dxgi_adapter_) {
     RTC_LOG(LS_WARNING) << "An empty IDXGIAdapter instance has been received.";
@@ -34,6 +34,7 @@ bool D3dDevice::Initialize(const ComPtr<IDXGIAdapter>& adapter) {
   // Default feature levels contain D3D 9.1 through D3D 11.0.
   _com_error error = D3D11CreateDevice(
       adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+      flags ? flags : 
       D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_SINGLETHREADED,
       nullptr, 0, D3D11_SDK_VERSION, d3d_device_.GetAddressOf(), &feature_level,
       context_.GetAddressOf());
@@ -67,7 +68,7 @@ bool D3dDevice::Initialize(const ComPtr<IDXGIAdapter>& adapter) {
 }
 
 // static
-std::vector<D3dDevice> D3dDevice::EnumDevices() {
+std::vector<D3dDevice> D3dDevice::EnumDevices(const UINT flags) {
   ComPtr<IDXGIFactory1> factory;
   _com_error error =
       CreateDXGIFactory1(__uuidof(IDXGIFactory1),
@@ -83,7 +84,7 @@ std::vector<D3dDevice> D3dDevice::EnumDevices() {
     error = factory->EnumAdapters(i, adapter.GetAddressOf());
     if (error.Error() == S_OK) {
       D3dDevice device;
-      if (device.Initialize(adapter)) {
+      if (device.Initialize(adapter, flags)) {
         result.push_back(std::move(device));
       }
     } else if (error.Error() == DXGI_ERROR_NOT_FOUND) {

@@ -18,6 +18,7 @@
 #include "modules/desktop_capture/desktop_frame_win.h"
 #include "modules/desktop_capture/win/screen_capture_utils.h"
 #include "modules/desktop_capture/win/window_capture_utils.h"
+#include "modules/desktop_capture/win/windows_graphics_capturer.h"
 #include "modules/desktop_capture/window_finder_win.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/constructor_magic.h"
@@ -104,7 +105,8 @@ BOOL CALLBACK WindowsEnumerationHandler(HWND hwnd, LPARAM param) {
 
 class WindowCapturerWin : public DesktopCapturer {
  public:
-  WindowCapturerWin(const bool allow_uwp_window_capture);
+  WindowCapturerWin(const bool allow_uwp_window_capture,
+    const bool allow_windows_graphics_capturer);
   ~WindowCapturerWin() override;
 
   // DesktopCapturer interface.
@@ -133,13 +135,23 @@ class WindowCapturerWin : public DesktopCapturer {
   WindowFinderWin window_finder_;
 
   const bool allow_uwp_window_capture_;
+  const bool allow_windows_graphics_capturer_;
+  bool source_cannot_use_windows_graphics_capturer_;
+
+  int frame_counter_;
+
+  std::unique_ptr< WindowsGraphicsCapturer> windows_graphics_capturer_;
 
   RTC_DISALLOW_COPY_AND_ASSIGN(WindowCapturerWin);
 };
 
 WindowCapturerWin::WindowCapturerWin(
-    const bool allow_uwp_window_capture)
-    : allow_uwp_window_capture_(allow_uwp_window_capture) {}
+    const bool allow_uwp_window_capture,
+    const bool allow_windows_graphics_capturer)
+    : allow_uwp_window_capture_(allow_uwp_window_capture),
+      allow_windows_graphics_capturer_(allow_windows_graphics_capturer),
+      source_cannot_use_windows_graphics_capturer_(false),
+      frame_counter_(0) {}
 WindowCapturerWin::~WindowCapturerWin() {}
 
 bool WindowCapturerWin::GetSourceList(SourceList* sources) {
@@ -179,6 +191,16 @@ bool WindowCapturerWin::SelectSource(SourceId id) {
   // When a window is not in the map, window_size_map_[window] will create an
   // item with DesktopSize (0, 0).
   previous_size_ = window_size_map_[window];
+
+  const size_t kClassLength = 256;
+  WCHAR class_name[kClassLength];
+  const int class_name_length = GetClassNameW(window, class_name, kClassLength);
+  RTC_DCHECK(class_name_length)
+      << "Error retrieving the application's class name";
+
+  source_cannot_use_windows_graphics_capturer_ = wcscmp(class_name, L"AcrobatSDIWindow") == 0;
+
+  frame_counter_ = 0;
   return true;
 }
 
@@ -194,6 +216,9 @@ bool WindowCapturerWin::FocusOnSelectedSource() {
 }
 
 bool WindowCapturerWin::IsOccluded(const DesktopVector& pos) {
+  if (windows_graphics_capturer_) {
+    return windows_graphics_capturer_->IsOccluded(pos);
+  }
   DesktopVector sys_pos = pos.add(GetFullscreenRect().top_left());
   return reinterpret_cast<HWND>(window_finder_.GetWindowUnderPoint(sys_pos)) !=
          window_;
@@ -273,6 +298,27 @@ void WindowCapturerWin::CaptureFrame() {
         static_cast<double>(window_dc_size.height()) / original_rect.height();
     original_rect.Scale(vertical_scale, horizontal_scale);
     cropped_rect.Scale(vertical_scale, horizontal_scale);
+  }
+
+  if (frame_counter_ < 2) {
+    frame_counter_++;
+  } else if (allow_windows_graphics_capturer_ &&
+             !source_cannot_use_windows_graphics_capturer_ &&
+             WindowsGraphicsCapturer::IsSupported()) {
+    if (!windows_graphics_capturer_) {
+      windows_graphics_capturer_ = std::make_unique<WindowsGraphicsCapturer>();
+      if (windows_graphics_capturer_->SelectSource(reinterpret_cast<SourceId>(window_))) {
+        windows_graphics_capturer_->Start(callback_);
+      } else {
+        windows_graphics_capturer_.reset();
+      }
+    }
+    if (windows_graphics_capturer_) {
+      DesktopVector top_left = original_rect.top_left().subtract(GetFullscreenRect().top_left());
+      windows_graphics_capturer_->CaptureFrame(&top_left);
+      ReleaseDC(window_, window_dc);
+      return;
+    }
   }
 
   std::unique_ptr<DesktopFrameWin> frame(
@@ -369,7 +415,8 @@ void WindowCapturerWin::CaptureFrame() {
 std::unique_ptr<DesktopCapturer> DesktopCapturer::CreateRawWindowCapturer(
     const DesktopCaptureOptions& options) {
   return std::unique_ptr<DesktopCapturer>(new WindowCapturerWin(
-      options.allow_uwp_window_capture()));
+      options.allow_uwp_window_capture(),
+      options.allow_windows_graphics_capturer()));
 }
 
 }  // namespace webrtc
