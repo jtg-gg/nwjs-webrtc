@@ -17,6 +17,7 @@
 #include "modules/desktop_capture/desktop_frame_win.h"
 #include "modules/desktop_capture/win/screen_capture_utils.h"
 #include "modules/desktop_capture/win/window_capture_utils.h"
+#include "modules/desktop_capture/win/windows_graphics_capturer.h"
 #include "modules/desktop_capture/window_finder_win.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/constructor_magic.h"
@@ -161,13 +162,17 @@ class WindowCapturerWin : public DesktopCapturer {
 
   bool allow_magnification_api_for_window_capture_;
 
+  int frame_counter_;
+
+  std::unique_ptr< WindowsGraphicsCapturer> windows_graphics_capturer_;
+
   RTC_DISALLOW_COPY_AND_ASSIGN(WindowCapturerWin);
 };
 
 WindowCapturerWin::WindowCapturerWin(
     bool allow_magnification_api_for_window_capture)
     : allow_magnification_api_for_window_capture_(
-          allow_magnification_api_for_window_capture) {}
+          allow_magnification_api_for_window_capture), frame_counter_(0) {}
 WindowCapturerWin::~WindowCapturerWin() {}
 
 bool WindowCapturerWin::GetSourceList(SourceList* sources) {
@@ -207,6 +212,7 @@ bool WindowCapturerWin::SelectSource(SourceId id) {
   // When a window is not in the map, window_size_map_[window] will create an
   // item with DesktopSize (0, 0).
   previous_size_ = window_size_map_[window];
+  frame_counter_ = 0;
   return true;
 }
 
@@ -271,6 +277,22 @@ void WindowCapturerWin::CaptureFrame() {
     window_size_map_[window_] = previous_size_;
     callback_->OnCaptureResult(Result::SUCCESS, std::move(frame));
     return;
+  }
+  if (frame_counter_ < 2) {
+    frame_counter_++;
+  } else if (WindowsGraphicsCapturer::IsSupported()) {
+    if (!windows_graphics_capturer_) {
+      windows_graphics_capturer_ = std::make_unique<WindowsGraphicsCapturer>();
+      if (windows_graphics_capturer_->SelectSource(reinterpret_cast<SourceId>(window_))) {
+        windows_graphics_capturer_->Start(callback_);
+      } else {
+        windows_graphics_capturer_.reset();
+      }
+    }
+    if (windows_graphics_capturer_) {
+      windows_graphics_capturer_->CaptureFrame();
+      return;
+    }
   }
 
   HDC window_dc = GetWindowDC(window_);

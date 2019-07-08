@@ -15,6 +15,7 @@
 #include "modules/desktop_capture/win/screen_capture_utils.h"
 #include "modules/desktop_capture/win/screen_capturer_win_magnifier.h"
 #include "modules/desktop_capture/win/window_capture_utils.h"
+#include "modules/desktop_capture/win/windows_graphics_capturer.h"
 #include "rtc_base/event.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/task_queue.h"
@@ -537,7 +538,8 @@ bool CroppingWindowCapturerWin::ShouldUseScreenCapturer() {
 }
 
 bool CroppingWindowCapturerWin::ShouldUseMagnifier() {
-  if (!options_.allow_magnification_api_for_window_capture())
+  if (!options_.allow_magnification_api_for_window_capture() || 
+      WindowsGraphicsCapturer::IsSupported())
     return false;
 
   bool result = selected_window_should_use_magnifier_;
