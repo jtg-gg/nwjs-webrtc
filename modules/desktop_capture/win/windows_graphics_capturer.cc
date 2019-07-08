@@ -30,7 +30,29 @@ using namespace ABI::Windows::Graphics::Capture;
 namespace webrtc {
 
 bool WindowsGraphicsCapturer::IsSupported() {
-  return true;
+  static HRESULT hr = -1;
+  static rtc::CriticalSection* lock = nullptr;
+  if (!lock) {
+    rtc::CriticalSection* temp_lock = new rtc::CriticalSection();
+    if (InterlockedCompareExchangePointer(
+      reinterpret_cast<PVOID*>(&lock), temp_lock, NULL)) {
+      delete temp_lock;
+    }
+  }
+
+  rtc::CritScope lockScoped(lock);
+  if (hr != -1) {
+    return SUCCEEDED(hr);
+  }
+
+  base::win::ScopedHString graphics_capture_item_guid = base::win::ScopedHString::Create(
+    RuntimeClass_Windows_Graphics_Capture_GraphicsCaptureItem);
+
+  ComPtr<IGraphicsCaptureItemInterop> interop_factory;
+  hr = base::win::RoGetActivationFactory(
+    graphics_capture_item_guid.get(), IID_PPV_ARGS(&interop_factory));
+
+  return SUCCEEDED(hr);
 }
 
 WindowsGraphicsCapturer::WindowsGraphicsCapturer() {}
