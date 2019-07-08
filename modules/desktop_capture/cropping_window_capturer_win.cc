@@ -15,6 +15,7 @@
 #include "modules/desktop_capture/win/screen_capture_utils.h"
 #include "modules/desktop_capture/win/screen_capturer_win_magnifier.h"
 #include "modules/desktop_capture/win/window_capture_utils.h"
+#include "modules/desktop_capture/win/windows_graphics_capturer.h"
 #include "rtc_base/event.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/task_queue.h"
@@ -383,6 +384,7 @@ class CroppingWindowCapturerWin : public CroppingWindowCapturer {
         capturer_(Unknown),
         cant_get_screen_magnifier_capturer_worker_(false),
         selected_window_should_use_magnifier_(false),
+        window_frame_counter_(0),
         should_use_screen_capturer_cache_(Empty) {}
 
  private:
@@ -409,6 +411,8 @@ class CroppingWindowCapturerWin : public CroppingWindowCapturer {
   Capturer capturer_;
   bool cant_get_screen_magnifier_capturer_worker_;
   bool selected_window_should_use_magnifier_;
+  // if window_frame_counter_ never > 1, it means we are in "WindowsList" mode
+  int window_frame_counter_;
   WindowCaptureHelperWin window_capture_helper_;
   std::unique_ptr<WindowsTopOfMeWorker> windows_top_of_me_worker_;
   enum BoolCache {
@@ -537,8 +541,12 @@ bool CroppingWindowCapturerWin::ShouldUseScreenCapturer() {
 }
 
 bool CroppingWindowCapturerWin::ShouldUseMagnifier() {
-  if (!options_.allow_magnification_api_for_window_capture())
+  if (!options_.allow_magnification_api_for_window_capture() ||
+       (window_frame_counter_ > 1 &&
+          options_.allow_windows_graphics_capturer() &&
+          WindowsGraphicsCapturer::IsSupported())) {
     return false;
+  }
 
   bool result = selected_window_should_use_magnifier_;
   if (result && screen_magnifier_capturer_worker_) {
@@ -737,6 +745,7 @@ bool CroppingWindowCapturerWin::CaptureFrameUsingMagnifierApi() {
 }
 
 bool CroppingWindowCapturerWin::SelectSource(SourceId id) {
+  window_frame_counter_ = 0;
   capturer_ = Unknown;
   HWND hwnd = reinterpret_cast<HWND>(id);
   WCHAR class_name[kClassLength];
@@ -846,6 +855,9 @@ void CroppingWindowCapturerWin::CaptureFrame() {
 void CroppingWindowCapturerWin::OnCaptureResult(
     DesktopCapturer::Result result,
     std::unique_ptr<DesktopFrame> screen_frame) {
+  if (window_frame_counter_ < 2) {
+    window_frame_counter_++;
+  }
   // hack so CroppingWindowCapturer::OnCaptureResult doesn't fallback to
   // window capturer
   should_use_screen_capturer_cache_ = True;

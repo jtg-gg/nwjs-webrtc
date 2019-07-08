@@ -38,7 +38,7 @@ class D3dDevice {
 
   // Returns all D3dDevice instances on the system. Returns an empty vector if
   // anything wrong.
-  static std::vector<D3dDevice> EnumDevices();
+  static std::vector<D3dDevice> EnumDevices(const UINT flags = 0);
 
  private:
   // Instances of D3dDevice should only be created by EnumDevices() static
@@ -46,7 +46,7 @@ class D3dDevice {
   D3dDevice();
 
   // Initializes the D3dDevice from an IDXGIAdapter.
-  bool Initialize(const Microsoft::WRL::ComPtr<IDXGIAdapter>& adapter);
+  bool Initialize(const Microsoft::WRL::ComPtr<IDXGIAdapter>& adapter, const UINT flags);
 
   Microsoft::WRL::ComPtr<ID3D11Device> d3d_device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
