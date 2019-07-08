@@ -132,7 +132,8 @@ bool GetWindowDrawableRect(HWND window,
 
 class WindowCapturerWin : public DesktopCapturer {
  public:
-  WindowCapturerWin(bool allow_magnification_api_for_window_capture);
+  WindowCapturerWin(const bool allow_magnification_api_for_window_capture, 
+    const bool allow_windows_graphics_capturer);
   ~WindowCapturerWin() override;
 
   // DesktopCapturer interface.
@@ -160,7 +161,8 @@ class WindowCapturerWin : public DesktopCapturer {
 
   WindowFinderWin window_finder_;
 
-  bool allow_magnification_api_for_window_capture_;
+  const bool allow_magnification_api_for_window_capture_;
+  const bool allow_windows_graphics_capturer_;
 
   int frame_counter_;
 
@@ -170,9 +172,12 @@ class WindowCapturerWin : public DesktopCapturer {
 };
 
 WindowCapturerWin::WindowCapturerWin(
-    bool allow_magnification_api_for_window_capture)
+    const bool allow_magnification_api_for_window_capture,
+    const bool allow_windows_graphics_capturer)
     : allow_magnification_api_for_window_capture_(
-          allow_magnification_api_for_window_capture), frame_counter_(0) {}
+          allow_magnification_api_for_window_capture), 
+      allow_windows_graphics_capturer_(allow_windows_graphics_capturer), 
+      frame_counter_(0) {}
 WindowCapturerWin::~WindowCapturerWin() {}
 
 bool WindowCapturerWin::GetSourceList(SourceList* sources) {
@@ -280,7 +285,7 @@ void WindowCapturerWin::CaptureFrame() {
   }
   if (frame_counter_ < 2) {
     frame_counter_++;
-  } else if (WindowsGraphicsCapturer::IsSupported()) {
+  } else if (allow_windows_graphics_capturer_ && WindowsGraphicsCapturer::IsSupported()) {
     if (!windows_graphics_capturer_) {
       windows_graphics_capturer_ = std::make_unique<WindowsGraphicsCapturer>();
       if (windows_graphics_capturer_->SelectSource(reinterpret_cast<SourceId>(window_))) {
@@ -393,7 +398,8 @@ void WindowCapturerWin::CaptureFrame() {
 std::unique_ptr<DesktopCapturer> DesktopCapturer::CreateRawWindowCapturer(
     const DesktopCaptureOptions& options) {
   return std::unique_ptr<DesktopCapturer>(new WindowCapturerWin(
-      options.allow_magnification_api_for_window_capture()));
+      options.allow_magnification_api_for_window_capture(),
+      options.allow_windows_graphics_capturer()));
 }
 
 }  // namespace webrtc
