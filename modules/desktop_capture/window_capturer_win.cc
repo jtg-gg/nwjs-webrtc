@@ -355,7 +355,7 @@ void WindowCapturerWin::CaptureFrame() {
   // Aero is enabled or PrintWindow() failed, use BitBlt. Do not use BitBlt
   // on Windows 8 or later as it renders black content and this is why we use
   // the cropping screen capturer.
-  if (!rtc::IsWindows8OrLater() && !result) {
+  if (!result) {
     result = BitBlt(mem_dc, 0, 0, frame->size().width(), frame->size().height(),
                     window_dc, data_cropped_rect.left(),
                     data_cropped_rect.top(), SRCCOPY);
