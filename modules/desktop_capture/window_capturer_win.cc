@@ -12,6 +12,7 @@
 
 #include <memory>
 
+#include "modules/desktop_capture/cropped_desktop_frame.h"
 #include "modules/desktop_capture/desktop_capture_options.h"
 #include "modules/desktop_capture/desktop_capturer.h"
 #include "modules/desktop_capture/desktop_frame_win.h"
@@ -100,34 +101,6 @@ BOOL CALLBACK WindowsEnumerationHandler(HWND hwnd, LPARAM param) {
   list->push_back(window);
 
   return TRUE;
-}
-
-// Retrieves the rectangle of the window rect which is drawable by either OS or
-// the owner application. The returned DesktopRect is in system coordinates.
-// This function returns false if native APIs fail.
-//
-// When |window| is maximized, its borders and shadow effect will be ignored by
-// OS and leave black. So we prefer to use GetCroppedWindowRect() when capturing
-// its content to avoid the black area in the final DesktopFrame. But when the
-// window is in normal mode, borders and shadow should be included.
-bool GetWindowDrawableRect(HWND window,
-                           DesktopRect* drawable_rect,
-                           DesktopRect* original_rect) {
-  if (!GetWindowRect(window, original_rect)) {
-    return false;
-  }
-
-  bool is_maximized = false;
-  if (!IsWindowMaximized(window, &is_maximized)) {
-    return false;
-  }
-
-  if (is_maximized) {
-    return GetCroppedWindowRect(window, drawable_rect,
-                                /* original_rect */ nullptr);
-  }
-  *drawable_rect = *original_rect;
-  return true;
 }
 
 class WindowCapturerWin : public DesktopCapturer {
@@ -263,7 +236,7 @@ void WindowCapturerWin::CaptureFrame() {
 
   DesktopRect cropped_rect;
   DesktopRect original_rect;
-  if (!GetWindowDrawableRect(window_, &cropped_rect, &original_rect)) {
+  if (!GetCroppedWindowRect(window_, &cropped_rect, &original_rect)) {
     RTC_LOG(LS_WARNING) << "Failed to get drawable window area: "
                         << GetLastError();
     callback_->OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
@@ -331,7 +304,7 @@ void WindowCapturerWin::CaptureFrame() {
   }
 
   std::unique_ptr<DesktopFrameWin> frame(
-      DesktopFrameWin::Create(cropped_rect.size(), nullptr, window_dc));
+      DesktopFrameWin::Create(original_rect.size(), nullptr, window_dc));
   if (!frame.get()) {
     RTC_LOG(LS_WARNING) << "Failed to create frame.";
     ReleaseDC(window_, window_dc);
@@ -359,17 +332,33 @@ void WindowCapturerWin::CaptureFrame() {
   // PrintWindow() whenever window size changes, including the first time of
   // capturing - it somehow affects what we get from BitBlt() on the subsequent
   // captures.
-
-  if (!window_capture_helper_.IsAeroEnabled() ||
-      !previous_size_.equals(frame->size())) {
+  //
+  // For Windows 8 and later, we want to awlays use PrintWindow when the
+  // cropping screen capturer falls back to the window capturer. I.e.
+  // on Windows 8 and later, PrintWindow is only used when the window is
+  // occluded. When the window is not occluded, it is much faster to capture
+  // the screen and to crop it to the window position and size.
+  if (rtc::IsWindows8OrLater()) {
+    // Special flag that makes PrintWindow to work on Windows 8 and later.
+    // otherwise it either fails or it renders black frames.
+    const UINT flags = PW_RENDERFULLCONTENT;
+    result = PrintWindow(window_, mem_dc, flags);
+  } else if (!window_capture_helper_.IsAeroEnabled() ||
+             !previous_size_.equals(frame->size())) {
     result = PrintWindow(window_, mem_dc, 0);
   }
 
-  // Aero is enabled or PrintWindow() failed, use BitBlt.
-  if (!result) {
+  // Data cropped rect is relative to the first pixel of the frame.
+  DesktopRect data_cropped_rect = cropped_rect;
+  data_cropped_rect.Translate(-original_rect.left(), -original_rect.top());
+
+  // Aero is enabled or PrintWindow() failed, use BitBlt. Do not use BitBlt
+  // on Windows 8 or later as it renders black content and this is why we use
+  // the cropping screen capturer.
+  if (!rtc::IsWindows8OrLater() && !result) {
     result = BitBlt(mem_dc, 0, 0, frame->size().width(), frame->size().height(),
-                    window_dc, cropped_rect.left() - original_rect.left(),
-                    cropped_rect.top() - original_rect.top(), SRCCOPY);
+                    window_dc, data_cropped_rect.left(),
+                    data_cropped_rect.top(), SRCCOPY);
   }
 
   SelectObject(mem_dc, previous_object);
@@ -382,14 +371,18 @@ void WindowCapturerWin::CaptureFrame() {
   frame->mutable_updated_region()->SetRect(
       DesktopRect::MakeSize(frame->size()));
   frame->set_top_left(
-      cropped_rect.top_left().subtract(GetFullscreenRect().top_left()));
+      original_rect.top_left().subtract(GetFullscreenRect().top_left()));
 
-  if (result) {
-    callback_->OnCaptureResult(Result::SUCCESS, std::move(frame));
-  } else {
+  if (!result) {
     RTC_LOG(LS_ERROR) << "Both PrintWindow() and BitBlt() failed.";
     callback_->OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
   }
+
+  std::unique_ptr<DesktopFrame> cropped_frame =
+      CreateCroppedDesktopFrame(std::move(frame), data_cropped_rect);
+  RTC_DCHECK(cropped_frame);
+
+  callback_->OnCaptureResult(Result::SUCCESS, std::move(cropped_frame));
 }
 
 }  // namespace
