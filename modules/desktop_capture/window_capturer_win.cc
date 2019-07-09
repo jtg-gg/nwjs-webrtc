@@ -33,7 +33,7 @@ namespace {
 
 struct SourceListContext {
   DesktopCapturer::SourceList list;
-  const bool allow_magnification_api_for_window_capture;
+  const bool allow_uwp_window_capture;
 };
 
 BOOL CALLBACK WindowsEnumerationHandler(HWND hwnd, LPARAM param) {
@@ -77,7 +77,7 @@ BOOL CALLBACK WindowsEnumerationHandler(HWND hwnd, LPARAM param) {
   // http://crbug.com/526883.
   if (rtc::IsWindows8OrLater()) {
     if (wcscmp(class_name, L"ApplicationFrameWindow") == 0 && 
-        !(context->allow_magnification_api_for_window_capture &&
+        !(context->allow_uwp_window_capture &&
           ChildWindowsContains(hwnd, L"Windows.UI.Core.CoreWindow"))) {
         return TRUE;
     } else if (wcscmp(class_name, L"Windows.UI.Core.CoreWindow") == 0) {
@@ -105,7 +105,7 @@ BOOL CALLBACK WindowsEnumerationHandler(HWND hwnd, LPARAM param) {
 
 class WindowCapturerWin : public DesktopCapturer {
  public:
-  WindowCapturerWin(const bool allow_magnification_api_for_window_capture, 
+  WindowCapturerWin(const bool allow_uwp_window_capture,
     const bool allow_windows_graphics_capturer);
   ~WindowCapturerWin() override;
 
@@ -134,7 +134,7 @@ class WindowCapturerWin : public DesktopCapturer {
 
   WindowFinderWin window_finder_;
 
-  const bool allow_magnification_api_for_window_capture_;
+  const bool allow_uwp_window_capture_;
   const bool allow_windows_graphics_capturer_;
 
   int frame_counter_;
@@ -145,17 +145,16 @@ class WindowCapturerWin : public DesktopCapturer {
 };
 
 WindowCapturerWin::WindowCapturerWin(
-    const bool allow_magnification_api_for_window_capture,
+    const bool allow_uwp_window_capture,
     const bool allow_windows_graphics_capturer)
-    : allow_magnification_api_for_window_capture_(
-          allow_magnification_api_for_window_capture), 
+    : allow_uwp_window_capture_(allow_uwp_window_capture),
       allow_windows_graphics_capturer_(allow_windows_graphics_capturer), 
       frame_counter_(0) {}
 WindowCapturerWin::~WindowCapturerWin() {}
 
 bool WindowCapturerWin::GetSourceList(SourceList* sources) {
   SourceListContext context = {DesktopCapturer::SourceList(),
-                              allow_magnification_api_for_window_capture_};
+                              allow_uwp_window_capture_};
   LPARAM param = reinterpret_cast<LPARAM>(&context);
   // EnumWindows only enumerates root windows.
   if (!EnumWindows(&WindowsEnumerationHandler, param))
@@ -391,7 +390,7 @@ void WindowCapturerWin::CaptureFrame() {
 std::unique_ptr<DesktopCapturer> DesktopCapturer::CreateRawWindowCapturer(
     const DesktopCaptureOptions& options) {
   return std::unique_ptr<DesktopCapturer>(new WindowCapturerWin(
-      options.allow_magnification_api_for_window_capture(),
+      options.allow_uwp_window_capture(),
       options.allow_windows_graphics_capturer()));
 }
 

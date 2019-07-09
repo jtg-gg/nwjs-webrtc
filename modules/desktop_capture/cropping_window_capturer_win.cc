@@ -35,7 +35,7 @@ BOOL IsAncestor(const HWND ancestor,
                 const WCHAR* ancestor_title,
                 const DWORD ancestor_process_id,
                 const HWND hwnd,
-                const bool allow_magnification_api_for_window_capture) {
+                const bool allow_uwp_window_capture) {
   // Ignore descendant windows since we want to capture them.
   // This check does not work for tooltips and context menus. Drop down menus
   // and popup windows are fine.
@@ -66,7 +66,7 @@ BOOL IsAncestor(const HWND ancestor,
     }
   }
 
-  if (allow_magnification_api_for_window_capture) {
+  if (allow_uwp_window_capture) {
     // Xaml_WindowedPopupClass has "PopupHost" title, and different process id
     // hence we need to iterate using GetParent to confirm the ancestry
     HWND it = hwnd;
@@ -88,13 +88,13 @@ struct TopWindowVerifierContext {
       HWND excluded_window,
       DesktopRect selected_window_rect,
       WindowCaptureHelperWin* window_capture_helper,
-      const bool allow_magnification_api_for_window_capture)
+      const bool allow_uwp_window_capture)
       : selected_window(selected_window),
         excluded_window(excluded_window),
         selected_window_rect(selected_window_rect),
         window_capture_helper(window_capture_helper),
-        allow_magnification_api_for_window_capture(
-            allow_magnification_api_for_window_capture),
+        allow_uwp_window_capture(
+            allow_uwp_window_capture),
         is_top_window(false) {
     RTC_DCHECK_NE(selected_window, excluded_window);
 
@@ -108,7 +108,7 @@ struct TopWindowVerifierContext {
   WindowCaptureHelperWin* window_capture_helper;
   WCHAR selected_window_title[kTitleLength];
   DWORD selected_window_process_id;
-  const bool allow_magnification_api_for_window_capture;
+  const bool allow_uwp_window_capture;
   bool is_top_window;
 };
 
@@ -150,11 +150,11 @@ BOOL CALLBACK TopWindowVerifier(HWND hwnd, LPARAM param) {
 
   if (IsAncestor(context->selected_window, context->selected_window_title,
                  context->selected_window_process_id, hwnd,
-                 context->allow_magnification_api_for_window_capture)) {
+                 context->allow_uwp_window_capture)) {
     return TRUE;
   }
 
-  if (context->allow_magnification_api_for_window_capture) {
+  if (context->allow_uwp_window_capture) {
     WCHAR class_name[kClassLength];
     const int class_name_length = GetClassNameW(hwnd, class_name, kClassLength);
     RTC_DCHECK(class_name_length) << "Error retrieving the window's class name";
@@ -514,7 +514,7 @@ bool CroppingWindowCapturerWin::ShouldUseScreenCapturer() {
   TopWindowVerifierContext context(
       selected, reinterpret_cast<HWND>(excluded_window()), content_rect,
       &window_capture_helper_,
-      options_.allow_magnification_api_for_window_capture() &&
+      options_.allow_uwp_window_capture() &&
           rtc::IsWindows8OrLater());
 
   if (windows_top_of_me_worker_) {
@@ -782,7 +782,7 @@ void CroppingWindowCapturerWin::CaptureFrame() {
     window_region_rect_ = DesktopRect();
   }
 
-  if (options_.allow_magnification_api_for_window_capture() &&
+  if (options_.allow_uwp_window_capture() &&
       !windows_top_of_me_worker_) {
     windows_top_of_me_worker_ =
         std::make_unique<WindowsTopOfMeWorker>(&window_capture_helper_);
