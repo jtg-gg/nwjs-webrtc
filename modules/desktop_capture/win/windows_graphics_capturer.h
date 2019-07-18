@@ -39,6 +39,7 @@ public:
   bool IsOccluded(const DesktopVector& pos) override;
 
   static bool IsSupported();
+  void CaptureFrame(const DesktopVector* top_left);
 
 private:
   Callback* callback_ = nullptr;

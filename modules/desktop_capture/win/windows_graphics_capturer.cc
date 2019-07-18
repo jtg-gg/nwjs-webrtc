@@ -110,7 +110,7 @@ void WindowsGraphicsCapturer::Start(Callback* callback) {
   }
 }
 
-void WindowsGraphicsCapturer::CaptureFrame() {
+void WindowsGraphicsCapturer::CaptureFrame(const DesktopVector* top_left) {
   HRESULT hr;
   ComPtr<Direct3D11::IDirect3DSurface> surface;
   {
@@ -146,8 +146,13 @@ void WindowsGraphicsCapturer::CaptureFrame() {
   if (!res) { RTC_LOG(LS_ERROR) << "dxgi_texture_staging_->Release() fail"; }
 
   // cheat so the desktop_and_cursor_composer does not draw cursor
-  output_->set_top_left(DesktopVector(output_->size().height(), output_->size().width()));
+  if (top_left)
+    output_->set_top_left(*top_left);
   callback_->OnCaptureResult(Result::SUCCESS, output_->Share());
+}
+
+void WindowsGraphicsCapturer::CaptureFrame() {
+  CaptureFrame(nullptr);
 }
 
 bool WindowsGraphicsCapturer::GetSourceList(SourceList* sources) {
@@ -245,7 +250,8 @@ bool WindowsGraphicsCapturer::FocusOnSelectedSource() {
 }
 
 bool WindowsGraphicsCapturer::IsOccluded(const DesktopVector& pos) {
-  return false;
+  // cheat so the desktop_and_cursor_composer does not draw cursor
+  return true;
 }
 
 }  // namespace webrtc

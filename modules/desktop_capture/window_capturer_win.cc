@@ -205,6 +205,9 @@ bool WindowCapturerWin::FocusOnSelectedSource() {
 }
 
 bool WindowCapturerWin::IsOccluded(const DesktopVector& pos) {
+  if (windows_graphics_capturer_) {
+    return windows_graphics_capturer_->IsOccluded(pos);
+  }
   DesktopVector sys_pos = pos.add(GetFullscreenRect().top_left());
   return reinterpret_cast<HWND>(window_finder_.GetWindowUnderPoint(sys_pos)) !=
          window_;
@@ -255,22 +258,6 @@ void WindowCapturerWin::CaptureFrame() {
     callback_->OnCaptureResult(Result::SUCCESS, std::move(frame));
     return;
   }
-  if (frame_counter_ < 2) {
-    frame_counter_++;
-  } else if (allow_windows_graphics_capturer_ && WindowsGraphicsCapturer::IsSupported()) {
-    if (!windows_graphics_capturer_) {
-      windows_graphics_capturer_ = std::make_unique<WindowsGraphicsCapturer>();
-      if (windows_graphics_capturer_->SelectSource(reinterpret_cast<SourceId>(window_))) {
-        windows_graphics_capturer_->Start(callback_);
-      } else {
-        windows_graphics_capturer_.reset();
-      }
-    }
-    if (windows_graphics_capturer_) {
-      windows_graphics_capturer_->CaptureFrame();
-      return;
-    }
-  }
 
   HDC window_dc = GetWindowDC(window_);
   if (!window_dc) {
@@ -300,6 +287,26 @@ void WindowCapturerWin::CaptureFrame() {
         static_cast<double>(window_dc_size.height()) / original_rect.height();
     original_rect.Scale(vertical_scale, horizontal_scale);
     cropped_rect.Scale(vertical_scale, horizontal_scale);
+  }
+
+  if (frame_counter_ < 2) {
+    frame_counter_++;
+  }
+  else if (allow_windows_graphics_capturer_ && WindowsGraphicsCapturer::IsSupported()) {
+    if (!windows_graphics_capturer_) {
+      windows_graphics_capturer_ = std::make_unique<WindowsGraphicsCapturer>();
+      if (windows_graphics_capturer_->SelectSource(reinterpret_cast<SourceId>(window_))) {
+        windows_graphics_capturer_->Start(callback_);
+      }
+      else {
+        windows_graphics_capturer_.reset();
+      }
+    }
+    if (windows_graphics_capturer_) {
+      DesktopVector top_left = original_rect.top_left().subtract(GetFullscreenRect().top_left());
+      windows_graphics_capturer_->CaptureFrame(&top_left);
+      return;
+    }
   }
 
   std::unique_ptr<DesktopFrameWin> frame(
