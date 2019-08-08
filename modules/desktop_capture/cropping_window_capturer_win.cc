@@ -10,14 +10,10 @@
 
 #include "modules/desktop_capture/cropping_window_capturer.h"
 
-#include <dwmapi.h>
-#include "api/task_queue/global_task_queue_factory.h"
 #include "modules/desktop_capture/win/screen_capture_utils.h"
-#include "modules/desktop_capture/win/screen_capturer_win_magnifier.h"
 #include "modules/desktop_capture/win/window_capture_utils.h"
 #include "rtc_base/event.h"
 #include "rtc_base/logging.h"
-#include "rtc_base/task_queue.h"
 #include "rtc_base/thread.h"
 #include "rtc_base/time_utils.h"
 #include "rtc_base/trace_event.h"
@@ -173,171 +169,10 @@ BOOL CALLBACK TopWindowVerifier(HWND hwnd, LPARAM param) {
   return TRUE;
 }
 
-class ScreenCapturerWinMagnifierWorker : DesktopCapturer::Callback {
- public:
-  static rtc::RefCountedObject<ScreenCapturerWinMagnifierWorker>* Get();
-  bool CaptureFrame(DesktopCapturer::Callback* callback,
-                    const std::vector<WindowId>& windows);
-  DesktopCapturer::SourceId source_id() { return source_id_; }
-
- protected:
-  ~ScreenCapturerWinMagnifierWorker();
-  ScreenCapturerWinMagnifierWorker(ScreenId main_screen);
-  void OnCaptureResult(DesktopCapturer::Result result,
-                       std::unique_ptr<DesktopFrame> screen_frame);
-
- private:
-  const DesktopCapturer::SourceId source_id_;
-  std::unique_ptr<ScreenCapturerWinMagnifier> screen_magnifier_capturer_;
-  DesktopCapturer::Result result_;
-  std::unique_ptr<DesktopFrame> screen_frame_;
-  rtc::CriticalSection capture_lock_;
-  rtc::TaskQueue task_queue_;
-
-  static rtc::CriticalSection* singleton_lock_;
-  static rtc::RefCountedObject<ScreenCapturerWinMagnifierWorker>* singleton_;
-};
-
-rtc::RefCountedObject<ScreenCapturerWinMagnifierWorker>*
-    ScreenCapturerWinMagnifierWorker::singleton_ = nullptr;
-
-rtc::CriticalSection* ScreenCapturerWinMagnifierWorker::singleton_lock_ =
-    nullptr;
-
-rtc::RefCountedObject<ScreenCapturerWinMagnifierWorker>*
-ScreenCapturerWinMagnifierWorker::Get() {
-  if (!singleton_lock_) {
-    rtc::CriticalSection* singleton_lock = new rtc::CriticalSection();
-    if (InterlockedCompareExchangePointer(
-            reinterpret_cast<PVOID*>(&singleton_lock_), singleton_lock, NULL)) {
-      delete singleton_lock;
-    }
-  }
-  rtc::CritScope lock(singleton_lock_);
-  if (singleton_ == nullptr) {
-    ScreenId main_screen = kInvalidScreenId;
-    // DesktopRect desktop_rect_screen_0;
-    DesktopRect desktop_rect;
-    std::wstring device_key;
-
-    DesktopCapturer::SourceList screens;
-    GetScreenList(&screens);
-    for (unsigned int i = 0; i < screens.size(); i++) {
-      const ScreenId screen_id = screens[i].id;
-      if (IsScreenValid(screen_id, &device_key)) {
-        desktop_rect = GetScreenRect(screen_id, device_key);
-        // if (screen_id == 0) {
-        //  desktop_rect_screen_0 = desktop_rect;
-        //}
-        if (desktop_rect.top_left().is_zero()) {
-          main_screen = screen_id;
-          break;
-        }
-      }
-    }
-
-    // Magic configuration for magnification api window capturer
-    // basically there are some fail cases if the screen is configured
-    // vertically --> NOT USED ANYMORE
-    /*bool allow_magnification_api_for_window_capture = true;
-    switch (main_screen) {
-      case 0: {
-        if (screens.size() == 2) {
-          if (IsScreenValid(1, &device_key)) {
-            desktop_rect = GetScreenRect(1, device_key);
-            allow_magnification_api_for_window_capture =
-                desktop_rect_screen_0.bottom() < desktop_rect.top() ||
-                desktop_rect_screen_0.top() >= desktop_rect.top() ||
-                desktop_rect_screen_0.bottom() >= desktop_rect.bottom() ||
-                desktop_rect_screen_0.top() >= desktop_rect.bottom();
-          }
-        } else if (screens.size() >= 3) {
-          allow_magnification_api_for_window_capture = false;
-        }
-      } break;
-      case 1:
-        allow_magnification_api_for_window_capture =
-            desktop_rect_screen_0.top() < desktop_rect.bottom() ||
-            desktop_rect_screen_0.bottom() <= desktop_rect.bottom() ||
-            desktop_rect_screen_0.top() <= desktop_rect.top() ||
-            desktop_rect_screen_0.bottom() <= desktop_rect.top();
-        break;
-      default:
-        allow_magnification_api_for_window_capture = false;
-    }*/
-
-    if (main_screen != kInvalidScreenId) {
-      singleton_ = new rtc::RefCountedObject<ScreenCapturerWinMagnifierWorker>(
-          main_screen);
-    }
-  }
-  return singleton_;
-}
-
-ScreenCapturerWinMagnifierWorker::ScreenCapturerWinMagnifierWorker(
-    ScreenId main_screen)
-    : source_id_(main_screen), 
-      task_queue_(GlobalTaskQueueFactory().CreateTaskQueue(
-        "ScreenCapturerWinMagnifierWorker", TaskQueueFactory::Priority::NORMAL)) {
-  screen_magnifier_capturer_ = std::make_unique<ScreenCapturerWinMagnifier>();
-  // Magnifier Capturer only works on main monitor
-  screen_magnifier_capturer_->SelectSource(source_id_);
-  rtc::Event event;
-  task_queue_.PostTask([this, &event]() {
-    screen_magnifier_capturer_->Start(this);
-    event.Set();
-  });
-  event.Wait(rtc::Event::kForever);
-}
-
-ScreenCapturerWinMagnifierWorker::~ScreenCapturerWinMagnifierWorker() {
-  rtc::CritScope lock(singleton_lock_);
-  singleton_ = nullptr;
-}
-
-bool ScreenCapturerWinMagnifierWorker::CaptureFrame(
-    DesktopCapturer::Callback* callback,
-    const std::vector<WindowId>& windows) {
-  capture_lock_.Enter();
-  rtc::Event event;
-  bool result = false;
-  task_queue_.PostTask([this, &event, &result, &windows]() {
-    if (screen_magnifier_capturer_->SetExcludedWindows(windows)) {
-      screen_magnifier_capturer_->CaptureFrame();
-      result = true;
-    } else {
-      bool res = screen_magnifier_capturer_->SetExcludedWindows(
-          std::vector<WindowId>());
-      RTC_DCHECK(res)
-          << "screen_magnifier_capturer_->SetExcludedWindows failed";
-    }
-    event.Set();
-  });
-  event.Wait(rtc::Event::kForever);
-  std::unique_ptr<DesktopFrame> screen_frame = std::move(screen_frame_);
-  DesktopCapturer::Result capture_result = result_;
-  capture_lock_.Leave();
-
-  if (result == false) {
-    return false;
-  }
-
-  callback->OnCaptureResult(capture_result, std::move(screen_frame));
-  return true;
-}
-
-void ScreenCapturerWinMagnifierWorker::OnCaptureResult(
-    DesktopCapturer::Result result,
-    std::unique_ptr<DesktopFrame> screen_frame) {
-  RTC_DCHECK(!screen_frame_) << "screen_frame_ should be NULL";
-  result_ = result;
-  screen_frame_ = std::move(screen_frame);
-}
-
 class WindowsTopOfMeWorker : rtc::Runnable {
  public:
   WindowsTopOfMeWorker(WindowCaptureHelperWin* window_capture_helper);
-  void SelectWindow(HWND window, const bool is_using_magnifier);
+  void SelectWindow(HWND window);
   bool IsChanged(uint32_t in_last_ms);
 
   // used by ShouldUseScreenCapture
@@ -350,11 +185,6 @@ class WindowsTopOfMeWorker : rtc::Runnable {
     return core_windows_; 
   }
 
-  // used by Magnifier Capturer
-  std::vector<WindowId> exclusion_window_list() {
-    return reinterpret_cast<std::vector<WindowId>&>(exclusion_window_list_);
-  }
-
   static const uint32_t kLastMsThreshold;
 
  private:
@@ -365,7 +195,7 @@ class WindowsTopOfMeWorker : rtc::Runnable {
   WindowCaptureHelperWin* window_capture_helper_;
   HWND selected_window_;
   std::vector<HWND> core_windows_;
-  std::vector<HWND> exclusion_window_list_;
+  std::vector<HWND> windows_top_of_me_;
   uint32_t last_changed_;
   // kFps is how fast is this worker should run
   static const int kFps;
@@ -379,20 +209,15 @@ class CroppingWindowCapturerWin : public CroppingWindowCapturer {
   CroppingWindowCapturerWin(const DesktopCaptureOptions& options)
       : CroppingWindowCapturer(options),
         capturer_(Unknown),
-        cant_get_screen_magnifier_capturer_worker_(false),
-        selected_window_should_use_magnifier_(false),
         should_use_screen_capturer_cache_(Empty) {}
 
  private:
   bool ShouldUseScreenCapturer() override;
-  bool ShouldUseMagnifier();
   void CaptureFrame() override;
   bool SelectSource(SourceId id) override;
   DesktopRect GetWindowRectInVirtualScreen() override;
-  DesktopRect GetWindowRectInVirtualScreen(const bool magnifier);
   void OnCaptureResult(DesktopCapturer::Result result,
                        std::unique_ptr<DesktopFrame> frame) override;
-  bool CaptureFrameUsingMagnifierApi();
 
   // The region from GetWindowRgn in the desktop coordinate if the region is
   // rectangular, or the rect from GetWindowRect if the region is not set.
@@ -401,12 +226,9 @@ class CroppingWindowCapturerWin : public CroppingWindowCapturer {
   enum Capturer {
     Unknown,
     Screen,
-    Magnifier,
     Window,
   };
   Capturer capturer_;
-  bool cant_get_screen_magnifier_capturer_worker_;
-  bool selected_window_should_use_magnifier_;
   WindowCaptureHelperWin window_capture_helper_;
   std::unique_ptr<WindowsTopOfMeWorker> windows_top_of_me_worker_;
   enum BoolCache {
@@ -415,15 +237,9 @@ class CroppingWindowCapturerWin : public CroppingWindowCapturer {
     True,
   };
   BoolCache should_use_screen_capturer_cache_;
-  rtc::scoped_refptr<rtc::RefCountedObject<ScreenCapturerWinMagnifierWorker>>
-      screen_magnifier_capturer_worker_;
 };
 
 bool CroppingWindowCapturerWin::ShouldUseScreenCapturer() {
-  if (should_use_screen_capturer_cache_ != Empty) {
-    return should_use_screen_capturer_cache_;
-  }
-
   // RTC_DLOG(INFO) << "ShouldUseScreenCapturer()";
 
   if (!rtc::IsWindows8OrLater() && window_capture_helper_.IsAeroEnabled()) {
@@ -534,20 +350,6 @@ bool CroppingWindowCapturerWin::ShouldUseScreenCapturer() {
   return context.is_top_window;
 }
 
-bool CroppingWindowCapturerWin::ShouldUseMagnifier() {
-  if (!options_.allow_magnification_api_for_window_capture())
-    return false;
-
-  bool result = selected_window_should_use_magnifier_;
-  if (result && screen_magnifier_capturer_worker_) {
-    DesktopRect rect = GetWindowRectInVirtualScreen(true);
-    if (rect.is_empty()) {
-      result = false;
-    }
-  }
-  return result;
-}
-
 struct WindowsTopOfMeContext {
   WindowsTopOfMeContext(HWND selected_window,
                         WindowCaptureHelperWin* window_capture_helper)
@@ -616,15 +418,10 @@ WindowsTopOfMeWorker::WindowsTopOfMeWorker(
       window_capture_helper_(window_capture_helper),
       last_changed_(0) {}
 
-void WindowsTopOfMeWorker::SelectWindow(HWND window,
-                                        const bool is_using_magnifier) {
+void WindowsTopOfMeWorker::SelectWindow(HWND window) {
   selected_window_ = window;
-  if (is_using_magnifier) {
-    Run(NULL);
-  } else {
-    exclusion_window_list_.clear();
-    last_changed_ = 0;
-  }
+  windows_top_of_me_.clear();
+  last_changed_ = 0;
   ignore_counter_ = kIgnoreCounter;
 }
 
@@ -695,8 +492,8 @@ void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
 
     // the main purpose of this function, calculate if windows_top_of_me has changed
     if (context.window_is_moving ||
-        exclusion_window_list_ != context.windows_top_of_me) {
-      exclusion_window_list_ = context.windows_top_of_me;
+        windows_top_of_me_ != context.windows_top_of_me) {
+      windows_top_of_me_ = context.windows_top_of_me;
       last_changed_ = rtc::Time32();
     }
 
@@ -724,50 +521,12 @@ bool WindowsTopOfMeWorker::IsChanged(uint32_t in_last_ms) {
   return (rtc::Time32() - last_changed_) < in_last_ms;
 }
 
-bool CroppingWindowCapturerWin::CaptureFrameUsingMagnifierApi() {
-  if (!screen_magnifier_capturer_worker_) {
-    return false;
-  }
-
-  std::vector<WindowId> exclusion_windows =
-      windows_top_of_me_worker_->exclusion_window_list();
-  capturer_ = Magnifier;
-  RTC_DLOG(LS_INFO) << "Captured using " << capturer_;
-  return screen_magnifier_capturer_worker_->CaptureFrame(this,
-                                                         exclusion_windows);
-}
-
 bool CroppingWindowCapturerWin::SelectSource(SourceId id) {
   capturer_ = Unknown;
   HWND hwnd = reinterpret_cast<HWND>(id);
-  WCHAR class_name[kClassLength];
-  const int class_name_length = GetClassNameW(hwnd, class_name, kClassLength);
-  RTC_DCHECK(class_name_length)
-      << "Error retrieving the application's class name";
-  selected_window_should_use_magnifier_ = false;
-  
-  if (options_.allow_magnification_api_for_window_capture()) {
-    if (rtc::IsWindows8OrLater() &&
-        wcscmp(class_name, L"ApplicationFrameWindow") == 0) {
-      selected_window_should_use_magnifier_ = true;
-    }
-
-    if (!selected_window_should_use_magnifier_ &&
-        wcscmp(class_name, L"screenClass") == 0) {
-      selected_window_should_use_magnifier_ = true;
-    }
-
-    if (!selected_window_should_use_magnifier_ &&
-        ChildWindowsContains(hwnd, L"Intermediate D3D Window")) {
-      selected_window_should_use_magnifier_ = true;
-    }
-  }  
-
   if (windows_top_of_me_worker_) {
-    windows_top_of_me_worker_->SelectWindow(
-        hwnd, selected_window_should_use_magnifier_);
+    windows_top_of_me_worker_->SelectWindow(hwnd);
   }
-
   return CroppingWindowCapturer::SelectSource(id);
 }
 
@@ -782,8 +541,7 @@ void CroppingWindowCapturerWin::CaptureFrame() {
     windows_top_of_me_worker_ =
         std::make_unique<WindowsTopOfMeWorker>(&window_capture_helper_);
     windows_top_of_me_worker_->SelectWindow(
-        reinterpret_cast<HWND>(selected_window()),
-        selected_window_should_use_magnifier_);
+        reinterpret_cast<HWND>(selected_window()));
   }
 
   if (windows_top_of_me_worker_ &&
@@ -804,20 +562,6 @@ void CroppingWindowCapturerWin::CaptureFrame() {
       << "should_use_screen_capturer_cache_ should be Empty";
   should_use_screen_capturer_cache_ = ShouldUseScreenCapturer() ? True : False;
 
-  if (ShouldUseMagnifier() && !cant_get_screen_magnifier_capturer_worker_) {
-    if (should_use_screen_capturer_cache_ == False) {
-      if (!screen_magnifier_capturer_worker_.get()) {
-        screen_magnifier_capturer_worker_ =
-            ScreenCapturerWinMagnifierWorker::Get();
-
-        cant_get_screen_magnifier_capturer_worker_ =
-            !screen_magnifier_capturer_worker_;
-      }
-      if (CaptureFrameUsingMagnifierApi()) {
-        return;
-      }
-    }
-  }
 
   if (capturer_ != Unknown && capturer_ != Screen &&
       should_use_screen_capturer_cache_ == True) {
@@ -863,21 +607,11 @@ void CroppingWindowCapturerWin::OnCaptureResult(
     return;
   }
 
-  if (capturer_ == Magnifier && screen_frame) {
-    offset_ = screen_frame->top_left();
-    screen_frame->set_top_left(DesktopVector());
-  }
-
   CroppingWindowCapturer::OnCaptureResult(result, std::move(screen_frame));
   should_use_screen_capturer_cache_ = Empty;
 }
 
 DesktopRect CroppingWindowCapturerWin::GetWindowRectInVirtualScreen() {
-  return GetWindowRectInVirtualScreen(capturer_ == Magnifier);
-}
-
-DesktopRect CroppingWindowCapturerWin::GetWindowRectInVirtualScreen(
-    const bool magnifier) {
   TRACE_EVENT0("webrtc",
                "CroppingWindowCapturerWin::GetWindowRectInVirtualScreen");
   DesktopRect window_rect;
@@ -890,16 +624,6 @@ DesktopRect CroppingWindowCapturerWin::GetWindowRectInVirtualScreen(
 
   // Convert |window_rect| to be relative to the top-left of the virtual screen.
   DesktopRect screen_rect(GetFullscreenRect());
-  if (magnifier && screen_magnifier_capturer_worker_) {
-    std::wstring device_key;
-    DesktopCapturer::SourceId mainId =
-        screen_magnifier_capturer_worker_->source_id();
-    if (IsScreenValid(mainId, &device_key)) {
-      screen_rect = GetScreenRect(mainId, device_key);
-    }
-    window_rect.Translate(offset_);
-  }
-
   window_rect.IntersectWith(screen_rect);
   window_rect.Translate(-screen_rect.left(), -screen_rect.top());
   return window_rect;
