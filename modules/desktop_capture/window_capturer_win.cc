@@ -291,20 +291,19 @@ void WindowCapturerWin::CaptureFrame() {
 
   if (frame_counter_ < 2) {
     frame_counter_++;
-  }
-  else if (allow_windows_graphics_capturer_ && WindowsGraphicsCapturer::IsSupported()) {
+  } else if (allow_windows_graphics_capturer_ && WindowsGraphicsCapturer::IsSupported()) {
     if (!windows_graphics_capturer_) {
       windows_graphics_capturer_ = std::make_unique<WindowsGraphicsCapturer>();
       if (windows_graphics_capturer_->SelectSource(reinterpret_cast<SourceId>(window_))) {
         windows_graphics_capturer_->Start(callback_);
-      }
-      else {
+      } else {
         windows_graphics_capturer_.reset();
       }
     }
     if (windows_graphics_capturer_) {
       DesktopVector top_left = original_rect.top_left().subtract(GetFullscreenRect().top_left());
       windows_graphics_capturer_->CaptureFrame(&top_left);
+      ReleaseDC(window_, window_dc);
       return;
     }
   }
