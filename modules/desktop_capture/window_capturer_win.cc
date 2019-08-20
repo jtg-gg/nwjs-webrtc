@@ -136,6 +136,7 @@ class WindowCapturerWin : public DesktopCapturer {
 
   const bool allow_uwp_window_capture_;
   const bool allow_windows_graphics_capturer_;
+  bool source_cannot_use_windows_graphics_capturer_;
 
   int frame_counter_;
 
@@ -148,7 +149,8 @@ WindowCapturerWin::WindowCapturerWin(
     const bool allow_uwp_window_capture,
     const bool allow_windows_graphics_capturer)
     : allow_uwp_window_capture_(allow_uwp_window_capture),
-      allow_windows_graphics_capturer_(allow_windows_graphics_capturer), 
+      allow_windows_graphics_capturer_(allow_windows_graphics_capturer),
+      source_cannot_use_windows_graphics_capturer_(false),
       frame_counter_(0) {}
 WindowCapturerWin::~WindowCapturerWin() {}
 
@@ -189,6 +191,15 @@ bool WindowCapturerWin::SelectSource(SourceId id) {
   // When a window is not in the map, window_size_map_[window] will create an
   // item with DesktopSize (0, 0).
   previous_size_ = window_size_map_[window];
+
+  const size_t kClassLength = 256;
+  WCHAR class_name[kClassLength];
+  const int class_name_length = GetClassNameW(window, class_name, kClassLength);
+  RTC_DCHECK(class_name_length)
+      << "Error retrieving the application's class name";
+
+  source_cannot_use_windows_graphics_capturer_ = wcscmp(class_name, L"AcrobatSDIWindow") == 0;
+
   frame_counter_ = 0;
   return true;
 }
@@ -291,7 +302,9 @@ void WindowCapturerWin::CaptureFrame() {
 
   if (frame_counter_ < 2) {
     frame_counter_++;
-  } else if (allow_windows_graphics_capturer_ && WindowsGraphicsCapturer::IsSupported()) {
+  } else if (allow_windows_graphics_capturer_ &&
+             !source_cannot_use_windows_graphics_capturer_ &&
+             WindowsGraphicsCapturer::IsSupported()) {
     if (!windows_graphics_capturer_) {
       windows_graphics_capturer_ = std::make_unique<WindowsGraphicsCapturer>();
       if (windows_graphics_capturer_->SelectSource(reinterpret_cast<SourceId>(window_))) {
