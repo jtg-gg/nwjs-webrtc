@@ -309,14 +309,14 @@ void WindowCapturerWin::CaptureFrame() {
       windows_graphics_capturer_ = std::make_unique<WindowsGraphicsCapturer>();
       if (windows_graphics_capturer_->SelectSource(reinterpret_cast<SourceId>(window_))) {
         windows_graphics_capturer_->Start(callback_);
-      }
-      else {
+      } else {
         windows_graphics_capturer_.reset();
       }
     }
     if (windows_graphics_capturer_) {
       DesktopVector top_left = original_rect.top_left().subtract(GetFullscreenRect().top_left());
       windows_graphics_capturer_->CaptureFrame(&top_left);
+      ReleaseDC(window_, window_dc);
       return;
     }
   }
@@ -393,13 +393,18 @@ void WindowCapturerWin::CaptureFrame() {
   if (!result) {
     RTC_LOG(LS_ERROR) << "Both PrintWindow() and BitBlt() failed.";
     callback_->OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
+    return;
   }
 
   // Rect for the data is relative to the first pixel of the frame.
   cropped_rect.Translate(-original_rect.left(), -original_rect.top());
   std::unique_ptr<DesktopFrame> cropped_frame =
       CreateCroppedDesktopFrame(std::move(frame), cropped_rect);
-  RTC_DCHECK(cropped_frame);
+  if(!cropped_frame.get()) {
+    RTC_LOG(LS_ERROR) << "cropped_frame is null.";
+    callback_->OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
+    return;
+  }
 
   callback_->OnCaptureResult(Result::SUCCESS, std::move(cropped_frame));
 }
