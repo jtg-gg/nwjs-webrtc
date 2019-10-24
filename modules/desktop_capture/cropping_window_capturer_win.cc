@@ -137,7 +137,6 @@ class WindowsTopOfMeWorker {
 
  private:
   void Run(rtc::Thread* thread);
-  int ignore_counter_;
   std::unique_ptr<rtc::Thread> thread_;
   rtc::Event event_;
   WindowCaptureHelperWin* window_capture_helper_;
@@ -147,9 +146,6 @@ class WindowsTopOfMeWorker {
   uint32_t last_changed_;
   // kFps is how fast is this worker should run
   static const int kFps;
-  // kIgnoreCounter is currently 2, the number of IsChanged function called
-  // during CaptureFrame until OnCaptureResult
-  static const int kIgnoreCounter;
 };
 
 class CroppingWindowCapturerWin : public CroppingWindowCapturer {
@@ -350,20 +346,17 @@ BOOL CALLBACK WindowsTopOfMe(HWND hwnd, LPARAM param) {
 }
 
 const int WindowsTopOfMeWorker::kFps = 30;
-const int WindowsTopOfMeWorker::kIgnoreCounter = 2;
 const uint32_t WindowsTopOfMeWorker::kLastMsThreshold = 500;
 
 WindowsTopOfMeWorker::WindowsTopOfMeWorker(
     WindowCaptureHelperWin* window_capture_helper)
-    : ignore_counter_(kIgnoreCounter),
-      window_capture_helper_(window_capture_helper),
+    : window_capture_helper_(window_capture_helper),
       last_changed_(0) {}
 
 void WindowsTopOfMeWorker::SelectWindow(HWND window) {
   selected_window_ = window;
   windows_top_of_me_.clear();
   last_changed_ = 0;
-  ignore_counter_ = kIgnoreCounter;
 }
 
 void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
@@ -448,10 +441,6 @@ void WindowsTopOfMeWorker::Run(rtc::Thread* thread) {
 }
 
 bool WindowsTopOfMeWorker::IsChanged(uint32_t in_last_ms) {
-  if (ignore_counter_ > 0) {
-    ignore_counter_--;
-    return false;
-  }
   if (!thread_) {
     thread_ = rtc::Thread::Create();
     if (thread_->Start(/*this*/)) {
