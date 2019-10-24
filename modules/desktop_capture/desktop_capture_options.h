@@ -120,6 +120,14 @@ class RTC_EXPORT DesktopCaptureOptions {
     allow_uwp_window_capture_ = enabled;
   }
 
+
+  bool allow_windows_graphics_capturer() const {
+    return allow_windows_graphics_capturer_;
+  }
+  void set_allow_windows_graphics_capturer(bool enabled) {
+    allow_windows_graphics_capturer_ = enabled;
+  }
+
   // Flag that may be set to allow use of the cropping window capturer (which
   // captures the screen & crops that to the window region in some cases). An
   // advantage of using this is significantly higher capture frame rates than
@@ -158,6 +166,7 @@ class RTC_EXPORT DesktopCaptureOptions {
   bool allow_use_magnification_api_ = false;
   bool allow_directx_capturer_ = false;
   bool allow_uwp_window_capture_ = false;
+  bool allow_windows_graphics_capturer_ = false;
   bool allow_cropping_window_capturer_ = false;
 #endif
 #if defined(USE_X11)
