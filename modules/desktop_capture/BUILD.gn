@@ -352,6 +352,8 @@ rtc_static_library("desktop_capture_generic") {
     "win/selected_window_context.h",
     "win/window_capture_utils.cc",
     "win/window_capture_utils.h",
+    "win/windows_graphics_capturer.cc",
+    "win/windows_graphics_capturer.h",
     "window_capturer_win.cc",
     "window_finder.cc",
     "window_finder.h",
